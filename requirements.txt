@@ -1,2 +1,5 @@
 anthropic>=0.40
+ddgs>=0.1
+google-genai>=1.0
+openai>=1.0
 python-dotenv>=1.0

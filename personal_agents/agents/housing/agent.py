@@ -30,18 +30,24 @@ What you already know about this search:
 <criteria>
 {criteria}
 </criteria>
-{notes_section}
-You keep track of housing listings for the user with your tools:
-- add_listing — when the user mentions a place, record it. Capture whatever details they give (address, price, link) plus anything that bears on the criteria (is it a self-contained basement? distance to McMaster? which neighbourhood?).
-- update_listing — when something changes, update the listing's status. Statuses, roughly in order: new -> contacted -> viewed -> applying, or rejected at any point.
-- list_listings / get_listing — to review the current list and reason about it.
-- remember_preference — when the user states a new standing preference or constraint (a budget cap, "must allow pets", "no carpet", ...), save it so you apply it from then on.
+{feedback_section}{notes_section}
+**Current listings in the database:**
+{listings_snapshot}
+
+You keep track of housing listings with your tools:
+- search_web — search the internet for listings. When the user asks you to find places, call this with queries like "basement apartment Westdale Hamilton Kijiji" or "self-contained basement rent near McMaster". Run multiple searches (different sites, different queries) to get broad coverage. After each search, call add_listing for every promising result.
+- add_listing — record a new place. Capture address, price, url, self-contained/basement status, distance to McMaster, and neighbourhood.
+- update_listing — update status (new → contacted → viewed → applying → rejected) or add notes.
+- list_listings / get_listing — review or compare listings.
+- remember_preference — save a new standing constraint or preference ("must allow pets", "no carpet", budget cap, etc.).
+- record_feedback — save what the user likes or dislikes about specific features or locations. Use sentiment: "like", "dislike", or "dealbreaker". Call this any time the user expresses an opinion, even in passing.
 
 How to work:
-- When the user rejects a listing, always record why. If they didn't give a reason, ask for it before marking it rejected. Never suggest or recommend a rejected listing again.
-- When the user asks what's still in play, or to compare options, weigh every listing against all of the criteria — self-contained basement, walkability/commute to McMaster, neighbourhood, and price — not price alone. Leave rejected listings out.
-- Prefer your tools over memory of the chat; if something hasn't been recorded, say so. Always include a listing's id when you refer to it, so the user can act on it.
-- Be concise and concrete, and honest about gaps — if a listing is missing the information needed to judge a criterion, point that out."""
+- At the start of every session, briefly orient the user: how many listings are tracked, which are still in play, and whether anything needs follow-up.
+- When the user rejects a listing, always record why. If they didn't give a reason, ask for it. Never suggest rejected listings again.
+- When the user expresses any opinion about a feature or area ("I hate shared laundry", "I like having a backyard", "busy roads are a dealbreaker"), immediately call record_feedback — don't just acknowledge it.
+- When comparing options, weigh every listing against all criteria — self-contained basement, walkability to McMaster, neighbourhood, price, and all stored feedback. Leave rejected listings out.
+- Be concise and concrete. Always include a listing's id. If information is missing to judge a criterion, say so."""
 
 
 class HousingStore:
@@ -138,7 +144,7 @@ class HousingStore:
         listings = self._load()["listings"]
         if status:
             return [l for l in listings if l.get("status") == status]
-        if not include_rejected:  # rejected listings are out of play by default
+        if not include_rejected:
             return [l for l in listings if l.get("status") != "rejected"]
         return listings
 
@@ -150,25 +156,58 @@ class HousingAgent(BaseAgent):
     def setup(self) -> None:
         self.profile = JsonStore(self.data_dir / "profile.json")
         self.listings = HousingStore(self.data_dir / "listings.json")
-        if self.profile.load(None) is None:  # seed standing criteria on first run
-            self.profile.save({"criteria": DEFAULT_CRITERIA, "notes": []})
+        if self.profile.load(None) is None:
+            self.profile.save({"criteria": DEFAULT_CRITERIA, "notes": [], "feedback": []})
 
     # ---- prompt / standing memory ------------------------------------------
     def _profile(self) -> dict:
-        return self.profile.load({"criteria": DEFAULT_CRITERIA, "notes": []})
+        return self.profile.load({"criteria": DEFAULT_CRITERIA, "notes": [], "feedback": []})
 
     def system_prompt(self) -> str:
         p = self._profile()
+
+        # Standing preferences
         notes = p.get("notes") or []
         notes_section = ""
         if notes:
             joined = "\n".join(f"- {n}" for n in notes)
-            notes_section = (
-                f"\nAdditional standing preferences the user has told you:\n{joined}\n"
-            )
+            notes_section = f"\nStanding preferences:\n{joined}\n"
+
+        # Stored feedback (likes / dislikes / dealbreakers)
+        feedback = p.get("feedback") or []
+        feedback_section = ""
+        if feedback:
+            lines = []
+            for f in feedback:
+                label = f["sentiment"].upper()
+                topic = f["topic"]
+                note = f.get("note", "")
+                lines.append(f"  [{label}] {topic}" + (f" — {note}" if note else ""))
+            feedback_section = "\nStored feedback on features/locations:\n" + "\n".join(lines) + "\n"
+
+        # Compact listings snapshot so the agent knows state without a tool call
+        active = self.listings.list(include_rejected=False)
+        all_listings = self.listings.list(include_rejected=True)
+        rejected_count = sum(1 for l in all_listings if l.get("status") == "rejected")
+
+        if active:
+            lines = []
+            for l in active:
+                price = f"${l['price']}/mo" if l.get("price") else "price unknown"
+                lines.append(f"  #{l['id']} {l['address']} — {l['status']}, {price}")
+            listings_snapshot = "\n".join(lines)
+            if rejected_count:
+                listings_snapshot += f"\n  ({rejected_count} rejected — not shown)"
+        elif rejected_count:
+            listings_snapshot = f"None active. {rejected_count} rejected."
+        else:
+            listings_snapshot = "None recorded yet."
+
         return SYSTEM_TEMPLATE.format(
             criteria=p.get("criteria", DEFAULT_CRITERIA),
+            feedback_section=feedback_section,
             notes_section=notes_section,
+            listings_snapshot=listings_snapshot,
         )
 
     # ---- tools --------------------------------------------------------------
@@ -206,7 +245,7 @@ class HousingAgent(BaseAgent):
                     "properties": {
                         "id": {"type": "string", "description": "The id of the listing to update."},
                         "status": {"type": "string", "enum": statuses, "description": "New status."},
-                        "rejection_reason": {"type": "string", "description": "Why it was rejected. Required when status is 'rejected' so it is never suggested again."},
+                        "rejection_reason": {"type": "string", "description": "Why it was rejected. Required when status is 'rejected'."},
                         "price": {"type": "number"},
                         "url": {"type": "string"},
                         "bedrooms": {"type": "number"},
@@ -247,13 +286,59 @@ class HousingAgent(BaseAgent):
             ),
             Tool(
                 name="remember_preference",
-                description="Save a new standing preference or constraint to apply to the whole search from now on.",
+                description="Save a new standing preference or hard constraint that applies to the whole search.",
                 input_schema={
                     "type": "object",
                     "properties": {"note": {"type": "string", "description": "The preference to remember."}},
                     "required": ["note"],
                 },
                 handler=self._remember_preference,
+            ),
+            Tool(
+                name="search_web",
+                description=(
+                    "Search the web for housing listings or neighbourhood info. "
+                    "Try queries like 'basement apartment Westdale Hamilton Kijiji' or "
+                    "'self-contained basement for rent near McMaster Hamilton'. "
+                    "Call add_listing for every promising result you find."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."},
+                        "max_results": {"type": "integer", "description": "Results to fetch (default 6, max 10)."},
+                    },
+                    "required": ["query"],
+                },
+                handler=self._search_web,
+            ),
+            Tool(
+                name="record_feedback",
+                description=(
+                    "Record what the user likes, dislikes, or considers a dealbreaker about "
+                    "specific housing features, amenities, or locations. Call this any time "
+                    "the user expresses an opinion — even casually — so it persists across sessions."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "sentiment": {
+                            "type": "string",
+                            "enum": ["like", "dislike", "dealbreaker"],
+                            "description": "How the user feels about this.",
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "What the feedback is about, e.g. 'shared laundry', 'busy street', 'backyard'.",
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Optional extra detail or context.",
+                        },
+                    },
+                    "required": ["sentiment", "topic"],
+                },
+                handler=self._record_feedback,
             ),
         ]
 
@@ -293,3 +378,37 @@ class HousingAgent(BaseAgent):
         p.setdefault("notes", []).append(note)
         self.profile.save(p)
         return f"Saved preference: {note}"
+
+    def _search_web(self, inp: dict) -> str:
+        from ddgs import DDGS
+        query = (inp.get("query") or "").strip()
+        if not query:
+            return "Error: query is required."
+        max_results = min(int(inp.get("max_results") or 6), 10)
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+        except Exception as e:
+            return f"Search error: {e}"
+        if not results:
+            return "No results found."
+        lines = []
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r.get('title', '')}\n   {r.get('href', '')}\n   {r.get('body', '')}")
+        return "\n\n".join(lines)
+
+    def _record_feedback(self, inp: dict) -> str:
+        sentiment = (inp.get("sentiment") or "dislike").strip()
+        topic = (inp.get("topic") or "").strip()
+        if not topic:
+            return "Error: 'topic' is required."
+        entry = {
+            "sentiment": sentiment,
+            "topic": topic,
+            "note": (inp.get("note") or "").strip(),
+            "recorded_at": _now(),
+        }
+        p = self._profile()
+        p.setdefault("feedback", []).append(entry)
+        self.profile.save(p)
+        return f"Noted [{sentiment.upper()}]: {topic}"

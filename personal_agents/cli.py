@@ -13,7 +13,7 @@ try:
 except Exception:  # noqa: BLE001 - dotenv is optional
     pass
 
-from .core.llm import DEFAULT_MODEL, AgentRunner
+from .core.llm import DEFAULT_MODEL, AgentRunner, _is_gemini, _is_deepseek
 from .core.registry import discover
 
 
@@ -44,6 +44,33 @@ def _handle_error(e: Exception) -> None:
     elif isinstance(e, anthropic.APIStatusError):
         print(f"API error {e.status_code}: {getattr(e, 'message', str(e))}", file=sys.stderr)
     else:
+        try:
+            from google.genai import errors as genai_errors
+            if isinstance(e, genai_errors.ClientError) and "429" in str(e):
+                print(
+                    "Google API quota exceeded (free tier: ~15 req/min). "
+                    "Wait ~60 s and try again.",
+                    file=sys.stderr,
+                )
+                return
+            if isinstance(e, genai_errors.APIError):
+                print(f"Google API error: {e}", file=sys.stderr)
+                return
+        except ImportError:
+            pass
+        try:
+            import openai
+            if isinstance(e, openai.AuthenticationError):
+                print("DeepSeek authentication failed. Check DEEPSEEK_API_KEY.", file=sys.stderr)
+                return
+            if isinstance(e, openai.RateLimitError):
+                print("DeepSeek rate limit hit. Wait a moment and try again.", file=sys.stderr)
+                return
+            if isinstance(e, openai.APIError):
+                print(f"DeepSeek API error: {e}", file=sys.stderr)
+                return
+        except ImportError:
+            pass
         print(f"Error: {e}", file=sys.stderr)
 
 
@@ -95,7 +122,10 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--model",
         default=None,
-        help=f"Claude model to use (default: {DEFAULT_MODEL} or $AGENTS_MODEL)",
+        help=(
+            f"model to use (default: {DEFAULT_MODEL} or $AGENTS_MODEL); "
+            "e.g. claude-haiku-4-5, gemini-3.5-flash"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -121,7 +151,22 @@ def main(argv=None) -> int:
     agent = agents[args.agent](data_dir)
     runner = AgentRunner(agent, model=args.model or DEFAULT_MODEL)
 
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+    _model = args.model or DEFAULT_MODEL
+    if _is_gemini(_model):
+        if not os.environ.get("GOOGLE_API_KEY"):
+            print(
+                "\N{WARNING SIGN}  No GOOGLE_API_KEY found. Set it in your environment or a "
+                ".env file (see .env.example).",
+                file=sys.stderr,
+            )
+    elif _is_deepseek(_model):
+        if not os.environ.get("DEEPSEEK_API_KEY"):
+            print(
+                "\N{WARNING SIGN}  No DEEPSEEK_API_KEY found. Set it in your environment or a "
+                ".env file (see .env.example).",
+                file=sys.stderr,
+            )
+    elif not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         print(
             "\N{WARNING SIGN}  No ANTHROPIC_API_KEY found. Set it in your environment or a "
             ".env file (see .env.example).",
