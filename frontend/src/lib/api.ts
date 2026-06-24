@@ -1,0 +1,269 @@
+export interface SessionInfo {
+  session_id: string;
+  title: string;
+  message_count: number;
+}
+
+export interface SessionSearchResult {
+  session_id: string;
+  title: string;
+  snippet: string;
+}
+
+export interface StreamEvent {
+  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating";
+  session_id?: string;
+  text?: string;
+  message?: string;
+  new_topic?: string;
+  loaded_topics?: string[];
+  updated_topics?: string[];
+  fetched_urls?: string[];
+  model?: string;
+  cost_usd?: number;
+  cost_breakdown?: { chat: number; memory: number };
+}
+
+export interface TopicSummary {
+  slug: string;
+  description: string;
+}
+
+export interface TopicDetail {
+  slug: string;
+  description: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface SearchResult {
+  slug: string;
+  snippet: string;
+}
+
+export interface SemanticResult {
+  slug: string;
+  score: number;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  prompt: string;
+  schedule: string;
+  schedule_label: string;
+  next_run: string | null;
+  active: number;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+export async function fetchSessions(): Promise<SessionInfo[]> {
+  const r = await fetch("/sessions");
+  if (!r.ok) throw new Error("Failed to fetch sessions");
+  return r.json();
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await fetch(`/sessions/${id}`, { method: "DELETE" });
+}
+
+export async function searchSessions(q: string): Promise<SessionSearchResult[]> {
+  const r = await fetch(`/sessions/search?q=${encodeURIComponent(q)}`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.results;
+}
+
+export async function fetchSessionMessages(
+  id: string
+): Promise<Array<{ id: number; role: "user" | "assistant"; content: string }>> {
+  const r = await fetch(`/sessions/${id}/messages`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.messages;
+}
+
+export async function editMessage(sessionId: string, msgId: number, content: string): Promise<void> {
+  const r = await fetch(`/sessions/${sessionId}/messages/${msgId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!r.ok) throw new Error("Failed to edit message");
+}
+
+export async function deleteMessage(sessionId: string, msgId: number): Promise<void> {
+  const r = await fetch(`/sessions/${sessionId}/messages/${msgId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error("Failed to delete message");
+}
+
+// ---------------------------------------------------------------------------
+// Topics
+// ---------------------------------------------------------------------------
+
+export async function fetchTopics(): Promise<TopicSummary[]> {
+  const r = await fetch("/topics");
+  if (!r.ok) throw new Error("Failed to fetch topics");
+  const data = await r.json();
+  return data.topics;
+}
+
+export async function fetchTopic(slug: string): Promise<TopicDetail> {
+  const r = await fetch(`/topics/${encodeURIComponent(slug)}`);
+  if (!r.ok) throw new Error("Topic not found");
+  return r.json();
+}
+
+export async function saveTopic(slug: string, content: string, description = ""): Promise<void> {
+  const r = await fetch(`/topics/${encodeURIComponent(slug)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, description }),
+  });
+  if (!r.ok) throw new Error("Failed to save topic");
+}
+
+export async function createTopic(slug: string, description = ""): Promise<void> {
+  const r = await fetch(`/topics/${encodeURIComponent(slug)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: "Failed to create topic" }));
+    throw new Error(err.detail ?? "Failed to create topic");
+  }
+}
+
+export async function searchTopics(q: string): Promise<SearchResult[]> {
+  const r = await fetch(`/topics/search?q=${encodeURIComponent(q)}`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.results;
+}
+
+export async function semanticSearchTopics(q: string): Promise<SemanticResult[]> {
+  const r = await fetch(`/topics/semantic-search?q=${encodeURIComponent(q)}`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.results ?? [];
+}
+
+export async function reflect(): Promise<string[]> {
+  const r = await fetch("/reflect", { method: "POST" });
+  if (!r.ok) throw new Error("Reflect failed");
+  const data = await r.json();
+  return data.updated;
+}
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+export async function extractFile(file: File): Promise<{ filename: string; text: string; chars: number; size_kb: number; cost_usd: number }> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch("/files/extract", { method: "POST", body: form });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: "Failed to extract file" }));
+    throw new Error(err.detail ?? "Failed to extract file");
+  }
+  return r.json();
+}
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+export async function fetchTasks(): Promise<Task[]> {
+  const r = await fetch("/tasks");
+  if (!r.ok) throw new Error("Failed to fetch tasks");
+  const data = await r.json();
+  return data.tasks;
+}
+
+export async function createTask(title: string, prompt: string, schedule: string): Promise<{ id: string; next_run: string | null }> {
+  const r = await fetch("/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, prompt, schedule }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: "Failed to create task" }));
+    throw new Error(err.detail ?? "Failed to create task");
+  }
+  return r.json();
+}
+
+export async function toggleTask(id: string, active: boolean): Promise<void> {
+  await fetch(`/tasks/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active }),
+  });
+}
+
+export async function deleteTask(id: string): Promise<void> {
+  await fetch(`/tasks/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Chat stream
+// ---------------------------------------------------------------------------
+
+export interface AttachedFile {
+  name: string;
+  text: string;
+}
+
+export function streamChat(
+  message: string,
+  sessionId: string | null,
+  onEvent: (e: StreamEvent) => void,
+  images: string[] = [],
+  files: AttachedFile[] = []
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    const resp = await fetch("/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, session_id: sessionId, images, files }),
+      signal: controller.signal,
+    });
+
+    if (!resp.body) return;
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split("\n");
+      buf = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          onEvent(JSON.parse(line.slice(6)));
+        } catch {
+          // ignore malformed
+        }
+      }
+    }
+  })().catch((e) => {
+    if (e?.name !== "AbortError") {
+      onEvent({ type: "error", message: String(e) });
+    }
+  });
+
+  return () => controller.abort();
+}

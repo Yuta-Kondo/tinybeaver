@@ -3,17 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "personal-agents"
+name = "personal-agent"
 version = "0.1.0"
-description = "A growable system of specialized, memory-keeping CLI agents, powered by Claude."
-requires-python = ">=3.10"
-dependencies = [
-    "anthropic>=0.40",
-    "python-dotenv>=1.0",
-]
-
-[project.scripts]
-agents = "personal_agents.cli:main"
-
-[tool.setuptools.packages.find]
-include = ["personal_agents*"]
+description = "Personal AI agent — FastAPI backend with streaming, topic memory, and KaTeX UI."
+requires-python = ">=3.11"

@@ -9,15 +9,23 @@ dist/
 venv/
 env/
 [0-9]*/
+source/
+
+# Node
+node_modules/
+frontend/dist/
 
 # Tooling
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# Secrets and local agent memory
+# Secrets
 .env
+
+# Runtime data (DB, Claude memory files)
 data/
+memory/
 
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json
