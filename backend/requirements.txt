@@ -2,3 +2,6 @@ anthropic>=0.40
 fastapi>=0.111
 uvicorn[standard]>=0.29
 python-dotenv>=1.0
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
+google-auth-httplib2>=0.4

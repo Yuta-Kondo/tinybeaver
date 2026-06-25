@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import MessageBubble from "./MessageBubble";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
@@ -19,6 +19,11 @@ interface Props {
   onResend: (msgId: number, newContent: string) => void;
 }
 
+export interface ChatViewHandle {
+  focusInput: () => void;
+  setDraft: (text: string) => void;
+}
+
 function fileIcon(name: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "pdf") return "📄";
@@ -28,7 +33,7 @@ function fileIcon(name: string) {
   return "📎";
 }
 
-export default function ChatView({ messages, streaming, sessionId, onSend, onCancel, onResend }: Props) {
+const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, sessionId, onSend, onCancel, onResend }, ref) {
   const [draft, setDraft] = useState("");
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -39,8 +44,26 @@ export default function ChatView({ messages, streaming, sessionId, onSend, onCan
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pinnedRef = useRef(true);
 
+  useImperativeHandle(ref, () => ({
+    focusInput: () => textareaRef.current?.focus(),
+    setDraft: (text: string) => {
+      setDraft(text);
+      setTimeout(() => textareaRef.current?.focus(), 50);
+    },
+  }));
+
+  // Auto-focus textarea whenever the active session changes or new chat opens
   useEffect(() => {
-    if (messages.length === 0) pinnedRef.current = true;
+    if (!streaming) {
+      setTimeout(() => textareaRef.current?.focus(), 80);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (messages.length === 0) {
+      pinnedRef.current = true;
+      setTimeout(() => textareaRef.current?.focus(), 80);
+    }
   }, [messages.length === 0]);
 
   function handleScroll() {
@@ -280,4 +303,6 @@ export default function ChatView({ messages, streaming, sessionId, onSend, onCan
       </div>
     </div>
   );
-}
+});
+
+export default ChatView;

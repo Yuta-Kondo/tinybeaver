@@ -1,10 +1,10 @@
 import { useCallback, useRef, useState } from "react";
-import { type AttachedFile, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
+import { type AttachedFile, type GeoLocation, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
 
-export type MessageStatus = "searching" | "memory_updating";
+export type MessageStatus = "searching" | "memory_updating" | "reading_email";
 
 export interface Message {
-  id?: number;          // DB message id (set for loaded history)
+  id?: number;
   role: "user" | "assistant";
   content: string;
   images?: string[];
@@ -17,6 +17,8 @@ export interface Message {
   model?: string;
   costUsd?: number;
   costBreakdown?: { chat: number; memory: number };
+  locations?: GeoLocation[];
+  searchSources?: { n: number; url: string; title: string }[];
 }
 
 export function useChat(sessionId: string | null) {
@@ -66,6 +68,8 @@ export function useChat(sessionId: string | null) {
             ]);
           } else if (event.type === "searching") {
             updateLastAssistant({ status: "searching" });
+          } else if (event.type === "reading_email") {
+            updateLastAssistant({ status: "reading_email" });
           } else if (event.type === "delta" && event.text) {
             setMessages((prev) => {
               const copy = [...prev];
@@ -89,6 +93,8 @@ export function useChat(sessionId: string | null) {
               model: event.model,
               costUsd: event.cost_usd,
               costBreakdown: event.cost_breakdown,
+              locations: event.locations,
+              searchSources: event.search_sources,
             });
             setStreaming(false);
           } else if (event.type === "error") {

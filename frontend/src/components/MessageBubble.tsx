@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import type { Message } from "../hooks/useChat";
+import MapCard from "./MapCard";
 
 interface Props {
   message: Message;
@@ -12,8 +13,10 @@ interface Props {
   onDelete: (msgId: number) => void;
 }
 
-function StatusLine({ status }: { status: "searching" | "memory_updating" }) {
-  const label = status === "searching" ? "Searching the web…" : "Saving to memory…";
+function StatusLine({ status }: { status: "searching" | "memory_updating" | "reading_email" }) {
+  const label = status === "searching" ? "Searching the web…"
+    : status === "reading_email" ? "Reading emails…"
+    : "Saving to memory…";
   return (
     <div className="status-line">
       <span className="status-dot" />
@@ -54,6 +57,14 @@ function renderUserContent(content: string) {
   );
 }
 
+function safeHostname(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
+}
+
+function safeFavicon(url: string): string {
+  try { return `https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=16`; } catch { return ""; }
+}
+
 function formatCost(usd: number): string {
   if (usd < 0.00001) return "";
   if (usd < 0.0001) return "<0.01¢";
@@ -62,7 +73,7 @@ function formatCost(usd: number): string {
 }
 
 export default function MessageBubble({ message, sessionId, onResend, onDelete }: Props) {
-  const { id, role, content, images, streaming, status, newTopic, loadedTopics, updatedTopics, fetchedUrls, model, costUsd, costBreakdown } = message;
+  const { id, role, content, images, streaming, status, newTopic, loadedTopics, updatedTopics, fetchedUrls, model, costUsd, costBreakdown, locations, searchSources } = message;
 
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState(content);
@@ -127,7 +138,7 @@ export default function MessageBubble({ message, sessionId, onResend, onDelete }
           )
         ) : (
           <>
-            {status === "searching" && !content && <StatusLine status="searching" />}
+            {(status === "searching" || status === "reading_email") && !content && <StatusLine status={status} />}
             {content && (
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
@@ -144,7 +155,29 @@ export default function MessageBubble({ message, sessionId, onResend, onDelete }
             {streaming && !status && <span className="cursor" />}
             {streaming && !content && !status && <span className="cursor" />}
             {status === "memory_updating" && <StatusLine status="memory_updating" />}
-            {status === "searching" && content && <StatusLine status="searching" />}
+            {(status === "searching" || status === "reading_email") && content && <StatusLine status={status} />}
+            {!streaming && searchSources && searchSources.length > 0 && (
+              <div className="search-sources">
+                <div className="search-sources-label">References</div>
+                {searchSources.map((s) => (
+                  <a key={s.n} className="search-source-item" href={s.url} target="_blank" rel="noopener noreferrer">
+                    <span className="search-source-n">[{s.n}]</span>
+                    {safeFavicon(s.url) && (
+                      <span className="search-source-favicon">
+                        <img src={safeFavicon(s.url)} alt="" width={14} height={14} />
+                      </span>
+                    )}
+                    <span className="search-source-title">{s.title}</span>
+                    <span className="search-source-domain">{safeHostname(s.url)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {!streaming && locations && locations.length > 0 && (
+              <div className="map-cards">
+                {locations.map((loc, i) => <MapCard key={i} location={loc} />)}
+              </div>
+            )}
           </>
         )}
 
@@ -181,7 +214,10 @@ export default function MessageBubble({ message, sessionId, onResend, onDelete }
       {hovered && !streaming && id && !editing && (
         <div className={`msg-actions msg-actions--${role}`}>
           {role === "user" && (
-            <button className="msg-action-btn" onClick={startEdit} title="Edit & resend">✎</button>
+            <>
+              <button className="msg-action-btn" onClick={() => onResend(id, content)} title="Retry">↺</button>
+              <button className="msg-action-btn" onClick={startEdit} title="Edit & resend">✎</button>
+            </>
           )}
           <button
             className="msg-action-btn msg-action-btn--delete"

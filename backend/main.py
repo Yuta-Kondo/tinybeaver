@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .classifier import classify
+from . import gmail as gmail_module
 from .memory import (
     available_topics,
     create_topic,
@@ -80,7 +81,8 @@ Format responses in Markdown. Use LaTeX for all mathematics \
 To explicitly save a fact to memory mid-response, write:
 [[SAVE:topic_slug:The fact to save.]]
 This works for any existing topic slug. Use sparingly — only for facts the user \
-explicitly wants remembered or that are clearly important long-term.\
+explicitly wants remembered or that are clearly important long-term.
+
 """
 
 # ---------------------------------------------------------------------------
@@ -106,12 +108,56 @@ def startup():
 _MENTION_RE = re.compile(r'@([\w-]+)')
 _SAVE_RE = re.compile(r'\[\[SAVE:([\w-]+):([^\]]+)\]\]')
 _URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+_ADDRESS_RE = re.compile(
+    r'\b\d{1,5}\s+(?:[A-Za-z]+\.?\s+){1,4}'
+    r'(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd|Lane|Ln|'
+    r'Way|Place|Pl|Court|Ct|Circle|Cir|Highway|Hwy|Parkway|Pkwy|'
+    r'Terrace|Terr?|Crescent|Cres|Trail|Tr|Gate|Path|Row|Walk|Close|Cl)'
+    r'(?:\s+[NSEW](?:orth|outh|ast|est)?)?'
+    r'(?:,\s*[A-Za-z][A-Za-z\s]{1,30}(?:,\s*(?:ON|BC|AB|QC|MB|SK|NS|NB|PE|NL|NT|YT|NU|[A-Z]{2}))?)?',
+    re.IGNORECASE
+)
 
 _BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 _MAX_CONTENT = 5000
+
+
+def _detect_addresses(text: str) -> list[str]:
+    seen: set[str] = set()
+    results: list[str] = []
+    for m in _ADDRESS_RE.finditer(text):
+        addr = m.group(0).strip().rstrip(",.")
+        key = addr.lower()
+        if key not in seen:
+            seen.add(key)
+            results.append(addr)
+        if len(results) >= 4:
+            break
+    return results
+
+
+def _geocode(address: str) -> dict | None:
+    try:
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "json", "limit": 1},
+            headers={"User-Agent": "PersonalAgent/1.0 (kondoyutah15@gmail.com)"},
+            timeout=6,
+        )
+        data = resp.json()
+        if data:
+            return {
+                "address": address,
+                "lat": float(data[0]["lat"]),
+                "lng": float(data[0]["lon"]),
+                "display_name": data[0].get("display_name", address),
+            }
+    except Exception:
+        pass
+    return None
 
 
 def _parse_mentions(message: str, all_topics: list[str]) -> list[str]:
@@ -381,6 +427,49 @@ def chat_stream(req: ChatRequest):
     messages_for_api = api_messages + [{"role": "user", "content": user_content}]
     _MODEL = "claude-sonnet-4-6"
 
+    # Gmail client-side tools (only added when Gmail is connected)
+    def _gmail_tools() -> list[dict]:
+        if not gmail_module.get_connection_status()["connected"]:
+            return []
+        return [
+            {
+                "name": "list_emails",
+                "description": "List recent emails from the user's Gmail inbox. Call this when the user asks about emails, messages, or their inbox.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Gmail search query e.g. 'is:unread', 'from:boss@co.com', 'subject:invoice'. Empty = most recent."},
+                        "max_results": {"type": "integer", "description": "How many emails to return (default 10, max 20)"},
+                    },
+                },
+            },
+            {
+                "name": "get_email",
+                "description": "Read the full body of a specific email by its ID. Use after list_emails.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Email ID from list_emails"},
+                    },
+                    "required": ["id"],
+                },
+            },
+        ]
+
+    def _run_gmail_tool(name: str, inputs: dict) -> str:
+        try:
+            if name == "list_emails":
+                emails = gmail_module.list_emails(
+                    max_results=min(int(inputs.get("max_results", 10)), 20),
+                    query=inputs.get("query", ""),
+                )
+                return json.dumps(emails)
+            if name == "get_email":
+                return json.dumps(gmail_module.get_email(inputs["id"]))
+        except Exception as e:
+            return f"Error: {e}"
+        return "Unknown tool"
+
     def generate():
         meta: dict = {
             "type": "start",
@@ -395,32 +484,57 @@ def chat_stream(req: ChatRequest):
 
         full_text = ""
         chat_cost = 0.0
+        all_tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}] + _gmail_tools()
+        gmail_tool_names = {"list_emails", "get_email"}
+        current_messages = list(messages_for_api)
+        final_msg = None
+
         try:
-            with _client.messages.stream(
-                model=_MODEL,
-                max_tokens=4096,
-                system=system,
-                messages=messages_for_api,
-                tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
-            ) as stream:
-                for event in stream:
-                    etype = getattr(event, "type", None)
-                    if etype == "content_block_start":
-                        block = getattr(event, "content_block", None)
-                        if block and getattr(block, "type", None) == "server_tool_use":
-                            if getattr(block, "name", None) == "web_search":
-                                yield f"data: {json.dumps({'type': 'searching'})}\n\n"
-                    elif etype == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        if delta and getattr(delta, "type", None) == "text_delta":
-                            full_text += delta.text
-                            yield f"data: {json.dumps({'type': 'delta', 'text': delta.text})}\n\n"
-                # Capture usage after stream ends
-                try:
-                    final_msg = stream.get_final_message()
-                    chat_cost = _calc_cost(_MODEL, final_msg.usage.input_tokens, final_msg.usage.output_tokens)
-                except Exception:
-                    pass
+            while True:
+                with _client.messages.stream(
+                    model=_MODEL,
+                    max_tokens=4096,
+                    system=system,
+                    messages=current_messages,
+                    tools=all_tools,
+                ) as stream:
+                    for event in stream:
+                        etype = getattr(event, "type", None)
+                        if etype == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            if block and getattr(block, "type", None) == "server_tool_use":
+                                if getattr(block, "name", None) == "web_search":
+                                    yield f"data: {json.dumps({'type': 'searching'})}\n\n"
+                        elif etype == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta and getattr(delta, "type", None) == "text_delta":
+                                full_text += delta.text
+                                yield f"data: {json.dumps({'type': 'delta', 'text': delta.text})}\n\n"
+                    try:
+                        final_msg = stream.get_final_message()
+                        chat_cost += _calc_cost(_MODEL, final_msg.usage.input_tokens, final_msg.usage.output_tokens)
+                    except Exception:
+                        pass
+
+                # Handle client-side Gmail tool calls
+                if not final_msg or final_msg.stop_reason != "tool_use":
+                    break
+                tool_calls = [b for b in final_msg.content if getattr(b, "type", None) == "tool_use"]
+                client_calls = [tc for tc in tool_calls if tc.name in gmail_tool_names]
+                if not client_calls:
+                    break  # Only server-side tools remain
+
+                yield f"data: {json.dumps({'type': 'reading_email'})}\n\n"
+                tool_results = []
+                for tc in client_calls:
+                    result = _run_gmail_tool(tc.name, tc.input)
+                    tool_results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
+
+                current_messages = current_messages + [
+                    {"role": "assistant", "content": final_msg.content},
+                    {"role": "user", "content": tool_results},
+                ]
+
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
@@ -453,8 +567,37 @@ def chat_stream(req: ChatRequest):
         except Exception:
             pass
 
+        # Geocode addresses concurrently (Nominatim rate-limits to 1 req/s, but parallel is fine for small batches)
+        locations: list[dict] = []
+        try:
+            import concurrent.futures
+            addrs = _detect_addresses(clean_text)
+            if addrs:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                    futures = {ex.submit(_geocode, a): a for a in addrs}
+                    for f in concurrent.futures.as_completed(futures, timeout=8):
+                        loc = f.result()
+                        if loc:
+                            locations.append(loc)
+        except Exception:
+            pass
+
+        # Extract source URLs from web_search_tool_result blocks
+        search_sources: list[dict] = []
+        try:
+            if final_msg:
+                for block in final_msg.content:
+                    if getattr(block, "type", None) == "web_search_tool_result":
+                        for item in getattr(block, "content", []):
+                            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+                            title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else None) or url
+                            if url:
+                                search_sources.append({"n": len(search_sources) + 1, "url": url, "title": title})
+        except Exception:
+            pass
+
         total_cost = round(chat_cost + memory_cost, 6)
-        yield f"data: {json.dumps({'type': 'done', 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}, 'locations': locations, 'search_sources': search_sources})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -784,3 +927,62 @@ Only include topics that need changes. If all looks good, return {{}}."""
 @app.get("/health")
 def health():
     return {"ok": True, "topics": available_topics()}
+
+
+# ---------------------------------------------------------------------------
+# Gmail
+# ---------------------------------------------------------------------------
+
+@app.get("/auth/gmail/start")
+def gmail_auth_start():
+    try:
+        url = gmail_module.get_auth_url()
+        return {"url": url}
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+
+@app.get("/auth/gmail/callback")
+def gmail_auth_callback(code: str, state: str = ""):
+    try:
+        email = gmail_module.exchange_code(code, state)
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=f"http://localhost:5173/?gmail=connected&email={email}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/auth/gmail/status")
+def gmail_status():
+    return gmail_module.get_connection_status()
+
+
+@app.delete("/auth/gmail/disconnect")
+def gmail_disconnect():
+    gmail_module.disconnect()
+    return {"ok": True}
+
+
+class EmailQuery(BaseModel):
+    q: str = ""
+    max_results: int = 20
+
+
+@app.get("/emails")
+def list_emails(q: str = "", max_results: int = 20):
+    try:
+        return {"emails": gmail_module.list_emails(max_results=max_results, query=q)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/emails/{msg_id}")
+def get_email(msg_id: str):
+    try:
+        return gmail_module.get_email(msg_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

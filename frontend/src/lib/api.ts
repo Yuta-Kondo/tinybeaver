@@ -10,8 +10,15 @@ export interface SessionSearchResult {
   snippet: string;
 }
 
+export interface GeoLocation {
+  address: string;
+  lat: number;
+  lng: number;
+  display_name: string;
+}
+
 export interface StreamEvent {
-  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating";
+  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating" | "reading_email";
   session_id?: string;
   text?: string;
   message?: string;
@@ -22,6 +29,8 @@ export interface StreamEvent {
   model?: string;
   cost_usd?: number;
   cost_breakdown?: { chat: number; memory: number };
+  locations?: GeoLocation[];
+  search_sources?: { n: number; url: string; title: string }[];
 }
 
 export interface TopicSummary {
@@ -209,6 +218,52 @@ export async function toggleTask(id: string, active: boolean): Promise<void> {
 
 export async function deleteTask(id: string): Promise<void> {
   await fetch(`/tasks/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Gmail
+// ---------------------------------------------------------------------------
+
+export interface EmailSummary {
+  id: string;
+  from: string;
+  subject: string;
+  date: string;
+  snippet: string;
+}
+
+export interface EmailDetail extends EmailSummary {
+  to: string;
+  body: string;
+}
+
+export async function gmailStatus(): Promise<{ connected: boolean; email?: string }> {
+  const r = await fetch("/auth/gmail/status");
+  return r.json();
+}
+
+export async function gmailStartAuth(): Promise<string> {
+  const r = await fetch("/auth/gmail/start");
+  const data = await r.json();
+  return data.url as string;
+}
+
+export async function gmailDisconnect(): Promise<void> {
+  await fetch("/auth/gmail/disconnect", { method: "DELETE" });
+}
+
+export async function fetchEmails(q = "", max_results = 20): Promise<EmailSummary[]> {
+  const params = new URLSearchParams({ q, max_results: String(max_results) });
+  const r = await fetch(`/emails?${params}`);
+  if (!r.ok) throw new Error("Failed to fetch emails");
+  const data = await r.json();
+  return data.emails;
+}
+
+export async function fetchEmail(id: string): Promise<EmailDetail> {
+  const r = await fetch(`/emails/${id}`);
+  if (!r.ok) throw new Error("Failed to fetch email");
+  return r.json();
 }
 
 // ---------------------------------------------------------------------------

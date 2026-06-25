@@ -91,6 +91,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+    provider    TEXT PRIMARY KEY,
+    token_json  TEXT NOT NULL,
+    email       TEXT NOT NULL DEFAULT '',
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Migration: add columns that may not exist in older DBs
@@ -472,3 +479,34 @@ def delete_task(task_id: str) -> bool:
     cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+# ── OAuth token storage ───────────────────────────────────────────────────────
+
+def save_oauth_token(provider: str, token_json: str, email: str = "") -> None:
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO oauth_tokens (provider, token_json, email, updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(provider) DO UPDATE SET
+               token_json = excluded.token_json,
+               email      = excluded.email,
+               updated_at = excluded.updated_at""",
+        (provider, token_json, email),
+    )
+    conn.commit()
+
+
+def load_oauth_token(provider: str) -> dict | None:
+    row = _get_conn().execute(
+        "SELECT token_json, email FROM oauth_tokens WHERE provider = ?", (provider,)
+    ).fetchone()
+    if not row:
+        return None
+    return {"token_json": row["token_json"], "email": row["email"]}
+
+
+def delete_oauth_token(provider: str) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM oauth_tokens WHERE provider = ?", (provider,))
+    conn.commit()

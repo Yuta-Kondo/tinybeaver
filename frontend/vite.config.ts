@@ -12,6 +12,8 @@ export default defineConfig({
       "/files": "http://localhost:8000",
       "/tasks": "http://localhost:8000",
       "/health": "http://localhost:8000",
+      "/auth": "http://localhost:8000",
+      "/emails": "http://localhost:8000",
     },
   },
 });
