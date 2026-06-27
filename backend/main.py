@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import uuid
 from pathlib import Path
@@ -160,6 +161,27 @@ def _geocode(address: str) -> dict | None:
     return None
 
 
+def _run_tavily_search(query: str) -> tuple[str, list[dict]]:
+    key = os.getenv("TAVILY_API_KEY", "")
+    if not key:
+        return "Web search unavailable (no TAVILY_API_KEY set).", []
+    try:
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            json={"api_key": key, "query": query, "max_results": 5, "search_depth": "advanced"},
+            timeout=15,
+        )
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return "No results found.", []
+        sources = [{"url": r["url"], "title": r.get("title", r["url"])} for r in results]
+        parts = [f"Title: {r.get('title','')}\nURL: {r['url']}\n{r.get('content','')[:600]}" for r in results]
+        return "\n\n---\n\n".join(parts), sources
+    except Exception as e:
+        return f"Search error: {e}", []
+
+
 def _parse_mentions(message: str, all_topics: list[str]) -> list[str]:
     valid = set(all_topics)
     return [m for m in _MENTION_RE.findall(message) if m in valid]
@@ -174,8 +196,11 @@ def _strip_saves(text: str) -> str:
 
 
 def _build_system(context: str, summary: str) -> list[dict]:
+    from datetime import date
+    today = date.today().strftime("%Y-%m-%d")
     blocks: list[dict] = [
-        {"type": "text", "text": _STATIC_SYSTEM, "cache_control": {"type": "ephemeral"}}
+        {"type": "text", "text": _STATIC_SYSTEM, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": f"Today's date: {today}"},
     ]
     if summary:
         blocks.append({"type": "text", "text": f"## Earlier conversation summary\n\n{summary}"})
@@ -484,7 +509,17 @@ def chat_stream(req: ChatRequest):
 
         full_text = ""
         chat_cost = 0.0
-        all_tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}] + _gmail_tools()
+        search_sources: list[dict] = []
+        web_search_tool = {
+            "name": "web_search",
+            "description": "Search the web for current, up-to-date information. Use for recent news, prices, events, facts, or anything requiring fresh data.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query"}},
+                "required": ["query"],
+            },
+        }
+        all_tools = [web_search_tool] + _gmail_tools()
         gmail_tool_names = {"list_emails", "get_email"}
         current_messages = list(messages_for_api)
         final_msg = None
@@ -502,7 +537,7 @@ def chat_stream(req: ChatRequest):
                         etype = getattr(event, "type", None)
                         if etype == "content_block_start":
                             block = getattr(event, "content_block", None)
-                            if block and getattr(block, "type", None) == "server_tool_use":
+                            if block and getattr(block, "type", None) == "tool_use":
                                 if getattr(block, "name", None) == "web_search":
                                     yield f"data: {json.dumps({'type': 'searching'})}\n\n"
                         elif etype == "content_block_delta":
@@ -516,19 +551,25 @@ def chat_stream(req: ChatRequest):
                     except Exception:
                         pass
 
-                # Handle client-side Gmail tool calls
                 if not final_msg or final_msg.stop_reason != "tool_use":
                     break
                 tool_calls = [b for b in final_msg.content if getattr(b, "type", None) == "tool_use"]
-                client_calls = [tc for tc in tool_calls if tc.name in gmail_tool_names]
-                if not client_calls:
-                    break  # Only server-side tools remain
+                if not tool_calls:
+                    break
 
-                yield f"data: {json.dumps({'type': 'reading_email'})}\n\n"
                 tool_results = []
-                for tc in client_calls:
-                    result = _run_gmail_tool(tc.name, tc.input)
-                    tool_results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
+                for tc in tool_calls:
+                    if tc.name == "web_search":
+                        result_text, sources = _run_tavily_search(tc.input.get("query", ""))
+                        n_offset = len(search_sources)
+                        search_sources.extend(
+                            {"n": n_offset + i + 1, "url": s["url"], "title": s["title"]}
+                            for i, s in enumerate(sources)
+                        )
+                        tool_results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result_text})
+                    elif tc.name in gmail_tool_names:
+                        yield f"data: {json.dumps({'type': 'reading_email'})}\n\n"
+                        tool_results.append({"type": "tool_result", "tool_use_id": tc.id, "content": _run_gmail_tool(tc.name, tc.input)})
 
                 current_messages = current_messages + [
                     {"role": "assistant", "content": final_msg.content},
@@ -579,20 +620,6 @@ def chat_stream(req: ChatRequest):
                         loc = f.result()
                         if loc:
                             locations.append(loc)
-        except Exception:
-            pass
-
-        # Extract source URLs from web_search_tool_result blocks
-        search_sources: list[dict] = []
-        try:
-            if final_msg:
-                for block in final_msg.content:
-                    if getattr(block, "type", None) == "web_search_tool_result":
-                        for item in getattr(block, "content", []):
-                            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
-                            title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else None) or url
-                            if url:
-                                search_sources.append({"n": len(search_sources) + 1, "url": url, "title": title})
         except Exception:
             pass
 

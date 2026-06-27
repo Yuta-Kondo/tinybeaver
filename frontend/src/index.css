@@ -214,7 +214,38 @@ body {
   font-size: 15px;
   line-height: 1.68;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
   overflow: hidden;
+}
+
+/* ── Scrollbars ───────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--gb2);
+  border-radius: 99px;
+  transition: background 0.2s;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.28); }
+
+/* ── Selection ────────────────────────────────────── */
+::selection {
+  background: var(--em-glow);
+  color: var(--em-bright);
+}
+
+/* ── Focus ring ───────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--em);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline-offset: 3px;
 }
 
 /* Ambient emerald glow orbs behind everything */
@@ -1065,14 +1096,21 @@ body::after {
   background: rgba(5,18,10,0.6);
   backdrop-filter: var(--blur-sm);
   -webkit-backdrop-filter: var(--blur-sm);
-  max-width: 380px;
+  max-width: 360px;
+  transition: border-color 0.2s var(--ease);
 }
+.map-card:hover { border-color: var(--em-border); }
+
 .map-card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  gap: 8px;
+  gap: 7px;
+  padding: 9px 12px;
+}
+.map-card-pin-icon {
+  width: 14px; height: 14px;
+  color: var(--em);
+  flex-shrink: 0;
 }
 .map-card-address {
   font-size: 12px;
@@ -1081,6 +1119,8 @@ body::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 .map-card-open {
   font-size: 11px;
@@ -1088,25 +1128,55 @@ body::after {
   text-decoration: none;
   white-space: nowrap;
   flex-shrink: 0;
-  opacity: 0.8;
+  opacity: 0.75;
   transition: opacity 0.15s;
+  border-bottom: none !important;
 }
 .map-card-open:hover { opacity: 1; }
-.map-card-body {
-  height: 180px;
-  width: 100%;
+
+.map-card-body-link {
+  display: block;
+  position: relative;
+  text-decoration: none;
 }
+.map-card-body {
+  height: 170px;
+  width: 100%;
+  pointer-events: none;
+}
+.map-card-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 10px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+  background: linear-gradient(to top, rgba(0,0,0,0.45) 0%, transparent 60%);
+}
+.map-card-body-link:hover .map-card-overlay { opacity: 1; }
+.map-card-overlay-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.9);
+  letter-spacing: 0.04em;
+  background: rgba(0,0,0,0.5);
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  backdrop-filter: blur(6px);
+}
+
 /* Emerald pin */
 .map-pin {
   width: 14px; height: 14px;
   background: var(--em);
   border-radius: 50%;
-  border: 2px solid rgba(255,255,255,0.8);
-  box-shadow: 0 0 12px var(--em-glow), 0 0 4px var(--em);
+  border: 2px solid rgba(255,255,255,0.85);
+  box-shadow: 0 0 10px var(--em), 0 2px 6px rgba(0,0,0,0.4);
 }
-/* Override Leaflet's default light tile border */
 .leaflet-container { background: #0a1a10; }
-.leaflet-tile-pane { filter: saturate(0.9) brightness(0.95); }
+.leaflet-tile-pane { filter: saturate(0.85) brightness(0.92); }
 
 /* ── Scrollbar ────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; height: 4px; }

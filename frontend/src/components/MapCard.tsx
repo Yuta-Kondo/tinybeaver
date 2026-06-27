@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { GeoLocation } from "../lib/api";
 
-// Dynamically import leaflet to avoid SSR issues and fix default icon paths
 let leafletLoaded = false;
 
 interface Props {
@@ -15,12 +14,10 @@ export default function MapCard({ location }: Props) {
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    // Leaflet needs to be imported dynamically because it touches `window`
     import("leaflet").then((L) => {
       if (!containerRef.current || mapRef.current) return;
 
       if (!leafletLoaded) {
-        // Fix default marker icons (bundler strips the default path resolution)
         delete (L.Icon.Default.prototype as any)._getIconUrl;
         L.Icon.Default.mergeOptions({
           iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -39,13 +36,11 @@ export default function MapCard({ location }: Props) {
         dragging: false,
       });
 
-      // CartoDB Dark Matter tiles — matches our dark UI
       L.tileLayer(
         "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
         { subdomains: "abcd", maxZoom: 20 }
       ).addTo(map);
 
-      // Emerald-tinted custom marker
       const icon = L.divIcon({
         className: "",
         html: `<div class="map-pin"></div>`,
@@ -63,17 +58,32 @@ export default function MapCard({ location }: Props) {
     };
   }, [location.lat, location.lng]);
 
-  const googleUrl = `https://maps.google.com/?q=${location.lat},${location.lng}`;
+  // q=lat,lng drops an exact pin; label= shows the place name in the info card
+  const googleUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}&label=${encodeURIComponent(location.address)}`;
+
+  // Short label: first two comma-separated parts of the display name
+  const shortLabel = location.display_name
+    ? location.display_name.split(",").slice(0, 2).join(",").trim()
+    : location.address;
 
   return (
     <div className="map-card">
       <div className="map-card-header">
-        <span className="map-card-address">📍 {location.address}</span>
+        <svg className="map-card-pin-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 1.5A4.5 4.5 0 0 0 3.5 6c0 3 4.5 8.5 4.5 8.5S12.5 9 12.5 6A4.5 4.5 0 0 0 8 1.5Z" fill="currentColor" fill-opacity="0.15" stroke="currentColor" stroke-width="1.2"/>
+          <circle cx="8" cy="6" r="1.5" fill="currentColor"/>
+        </svg>
+        <span className="map-card-address">{shortLabel}</span>
         <a className="map-card-open" href={googleUrl} target="_blank" rel="noopener noreferrer">
           Open in Maps ↗
         </a>
       </div>
-      <div className="map-card-body" ref={containerRef} />
+      <a href={googleUrl} target="_blank" rel="noopener noreferrer" className="map-card-body-link">
+        <div className="map-card-body" ref={containerRef} />
+        <div className="map-card-overlay">
+          <span className="map-card-overlay-label">View on Google Maps</span>
+        </div>
+      </a>
     </div>
   );
 }
