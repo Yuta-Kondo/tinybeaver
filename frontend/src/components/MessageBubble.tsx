@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -11,6 +11,21 @@ interface Props {
   sessionId: string | null;
   onResend: (msgId: number, newContent: string) => void;
   onDelete: (msgId: number) => void;
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [text]);
+  return (
+    <button className="msg-action-btn" onClick={copy} title="Copy">
+      {copied ? "✓" : "⎘"}
+    </button>
+  );
 }
 
 function StatusLine({ status }: { status: "searching" | "memory_updating" | "reading_email" }) {
@@ -219,6 +234,7 @@ export default function MessageBubble({ message, sessionId, onResend, onDelete }
               <button className="msg-action-btn" onClick={startEdit} title="Edit & resend">✎</button>
             </>
           )}
+          <CopyButton text={content} />
           <button
             className="msg-action-btn msg-action-btn--delete"
             onClick={() => onDelete(id)}

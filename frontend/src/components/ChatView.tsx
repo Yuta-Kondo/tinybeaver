@@ -17,11 +17,49 @@ interface Props {
   onSend: (text: string, images: string[], files: AttachedFile[]) => void;
   onCancel: () => void;
   onResend: (msgId: number, newContent: string) => void;
+  onMenuOpen: () => void;
 }
 
 export interface ChatViewHandle {
   focusInput: () => void;
   setDraft: (text: string) => void;
+}
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target?.result as string ?? "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function resizeImage(file: File, maxPx: number, quality: number): Promise<string> {
+  return new Promise((resolve) => {
+    const fallback = () => readAsDataUrl(file).then(resolve).catch(() => resolve(""));
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    // Timeout in case img never fires on iOS
+    const timer = setTimeout(() => { URL.revokeObjectURL(objectUrl); fallback(); }, 8000);
+    img.onload = () => {
+      clearTimeout(timer);
+      URL.revokeObjectURL(objectUrl);
+      try {
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { fallback(); return; }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch {
+        fallback();
+      }
+    };
+    img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(objectUrl); fallback(); };
+    img.src = objectUrl;
+  });
 }
 
 function fileIcon(name: string) {
@@ -33,7 +71,7 @@ function fileIcon(name: string) {
   return "📎";
 }
 
-const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, sessionId, onSend, onCancel, onResend }, ref) {
+const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, sessionId, onSend, onCancel, onResend, onMenuOpen }, ref) {
   const [draft, setDraft] = useState("");
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -52,9 +90,19 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     },
   }));
 
-  // Auto-focus textarea whenever the active session changes or new chat opens
+  const isMobile = () => window.matchMedia("(pointer: coarse)").matches;
+
+  // On mobile, start textarea as readOnly so iOS doesn't misplace the caret on first tap.
+  // touchstart removes readOnly and focuses synchronously (within user gesture) so
+  // the keyboard opens once with the correct caret position — no cursor-outside-box glitch.
   useEffect(() => {
-    if (!streaming) {
+    const el = textareaRef.current;
+    if (el && isMobile()) el.readOnly = true;
+  }, []);
+
+  // Auto-focus textarea on desktop only — mobile keyboard opens on tap, not programmatically
+  useEffect(() => {
+    if (!streaming && !isMobile()) {
       setTimeout(() => textareaRef.current?.focus(), 80);
     }
   }, [sessionId]);
@@ -62,7 +110,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   useEffect(() => {
     if (messages.length === 0) {
       pinnedRef.current = true;
-      setTimeout(() => textareaRef.current?.focus(), 80);
+      if (!isMobile()) setTimeout(() => textareaRef.current?.focus(), 80);
     }
   }, [messages.length === 0]);
 
@@ -88,13 +136,14 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
   async function processFile(file: File) {
     const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const url = e.target?.result as string;
+    const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].includes(ext);
+    if (isImage) {
+      try {
+        const url = await resizeImage(file, 1920, 0.82);
         if (url) setPendingImages((p) => [...p, url]);
-      };
-      reader.readAsDataURL(file);
+      } catch (e: any) {
+        alert(`Could not load image "${file.name}": ${e?.message ?? e}`);
+      }
       return;
     }
 
@@ -209,12 +258,18 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         </div>
       )}
 
+      <div className="mobile-header">
+        <button className="hamburger-btn" onClick={onMenuOpen} aria-label="Open menu">
+          <span /><span /><span />
+        </button>
+        <span className="mobile-title">tinybeaver</span>
+      </div>
+
       <div className="messages" ref={scrollRef} onScroll={handleScroll}>
         {messages.length === 0 ? (
-          <div className="empty-state">
-            <h2>What's on your mind?</h2>
-            <p>Ask anything — your memory context loads automatically.</p>
-          </div>
+            <div className="empty-state">
+              <h2>Be humble, be strong.</h2>
+            </div>
         ) : (
           messages.map((m, i) => (
             <MessageBubble
@@ -278,7 +333,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.gif,.webp"
+            accept="image/*,.pdf,.csv,.txt,.md,.json"
             multiple
             style={{ display: "none" }}
             onChange={handleFileInput}
@@ -286,12 +341,31 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <textarea
             ref={textareaRef}
             rows={1}
-            placeholder="Message… (Ctrl+V to paste image)"
+            placeholder="Message…"
             value={draft}
             onChange={autoResize}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             disabled={streaming}
+            autoComplete="off"
+            autoCorrect="off"
+            onTouchStart={() => {
+              const el = textareaRef.current;
+              if (!el) return;
+              // Remove readOnly and focus synchronously within the user gesture
+              // so iOS opens keyboard exactly once with the correct caret position
+              el.readOnly = false;
+              el.focus();
+            }}
+            onBlur={() => {
+              // Restore readOnly when keyboard closes so next tap is also clean
+              const el = textareaRef.current;
+              if (el && isMobile()) {
+                setTimeout(() => {
+                  if (document.activeElement !== el) el.readOnly = true;
+                }, 100);
+              }
+            }}
           />
           {streaming ? (
             <button className="send-btn" onClick={onCancel} title="Stop">■</button>
@@ -299,7 +373,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             <button className="send-btn" onClick={submit} disabled={!canSend} title="Send (Enter)">↑</button>
           )}
         </div>
-        <p className="input-hint">Enter to send · Shift+Enter for newline · Drop or ⊕ to attach file</p>
+        <p className="input-hint desktop-only">Enter to send · Shift+Enter for newline · Drop or ⊕ to attach file</p>
       </div>
     </div>
   );

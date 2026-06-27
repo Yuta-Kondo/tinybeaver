@@ -231,6 +231,11 @@ def create_topic(slug: str, description: str = "") -> None:
     _get_conn().commit()
 
 
+def delete_topic(slug: str) -> None:
+    _get_conn().execute("DELETE FROM topics WHERE slug = ?", (slug,))
+    _get_conn().commit()
+
+
 def get_topic(slug: str) -> dict | None:
     row = _get_conn().execute(
         "SELECT slug, description, content, updated_at FROM topics WHERE slug = ?", (slug,)

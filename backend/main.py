@@ -81,8 +81,9 @@ Format responses in Markdown. Use LaTeX for all mathematics \
 
 To explicitly save a fact to memory mid-response, write:
 [[SAVE:topic_slug:The fact to save.]]
-This works for any existing topic slug. Use sparingly — only for facts the user \
-explicitly wants remembered or that are clearly important long-term.
+This works for any existing topic slug. Use sparingly — only for personal facts \
+about Yuta (preferences, decisions, plans, experiences). Never save general \
+knowledge, definitions, or facts that could be looked up online.
 
 """
 
@@ -234,10 +235,12 @@ Conversation:
 User: {user_msg[:3000]}
 Assistant: {assistant_msg[:1500]}
 {new_topic_note}
-For each topic that gained new factual information worth persisting, return updated markdown.
+For each topic that gained new **personal** information about Yuta worth persisting, return updated markdown.
+Only save: personal facts, preferences, decisions, plans, experiences, and context specific to Yuta.
+Never save: general knowledge, how-to explanations, definitions, or anything that could be looked up online.
 Return ONLY a JSON object: {{"topic_slug": "updated content", ...}}
 Omit topics with no changes. If nothing changed, return {{}}.
-Memory files are concise summaries, not transcripts. Do not invent facts."""
+Memory files are concise personal summaries, not transcripts. Do not invent facts."""
 
     _model = "claude-haiku-4-5-20251001"
     resp = _client.messages.create(
@@ -441,7 +444,8 @@ def chat_stream(req: ChatRequest):
             "type": "text",
             "text": f"[Attached file: {f.name}]\n{f.text}\n[End of {f.name}]",
         })
-    user_content.append({"type": "text", "text": req.message})
+    if req.message:
+        user_content.append({"type": "text", "text": req.message})
 
     save_message(session_id, "user", req.message)
 

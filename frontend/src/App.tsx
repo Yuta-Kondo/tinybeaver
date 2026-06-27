@@ -2,15 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatView, { type ChatViewHandle } from "./components/ChatView";
 import { useChat } from "./hooks/useChat";
-import { useTheme, type Theme } from "./hooks/useTheme";
 import { deleteSession, fetchSessions, type SessionInfo } from "./lib/api";
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const chatViewRef = useRef<ChatViewHandle>(null);
-  const { theme, setTheme } = useTheme();
-
   const { messages, streaming, sendMessage, resendFromMessage, cancel, clear, loadSession } =
     useChat(activeId);
 
@@ -27,6 +25,13 @@ export default function App() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
+      // Cmd/Ctrl+Shift+O — new chat (same as Claude.ai)
+      if (mod && e.shiftKey && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        handleNew();
+        setSidebarOpen(false);
+        return;
+      }
       // Cmd/Ctrl+K — focus search
       if (mod && e.key === "k") {
         e.preventDefault();
@@ -79,15 +84,15 @@ export default function App() {
 
   return (
     <div className="app">
+      {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
       <Sidebar
         sessions={sessions}
         activeId={activeId}
-        onSelect={handleSelect}
-        onNew={handleNew}
+        onSelect={(id) => { handleSelect(id); setSidebarOpen(false); }}
+        onNew={() => { handleNew(); setSidebarOpen(false); }}
         onDelete={handleDelete}
-        theme={theme}
-        onThemeChange={setTheme}
-        onSendToChat={handleSendToChat}
+        onSendToChat={(t) => { handleSendToChat(t); setSidebarOpen(false); }}
+        isOpen={sidebarOpen}
       />
       <ChatView
         ref={chatViewRef}
@@ -97,6 +102,7 @@ export default function App() {
         onSend={handleSend}
         onCancel={cancel}
         onResend={handleResend}
+        onMenuOpen={() => setSidebarOpen(true)}
       />
     </div>
   );
