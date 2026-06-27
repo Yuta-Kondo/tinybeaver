@@ -1,21 +1,27 @@
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
-  mem0:
-    image: mem0ai/mem0:latest
-    ports:
-      - "8080:8080"
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - GMAIL_CLIENT_ID=${GMAIL_CLIENT_ID}
+      - GMAIL_CLIENT_SECRET=${GMAIL_CLIENT_SECRET}
+      - GMAIL_REDIRECT_URI=${GMAIL_REDIRECT_URI}
+    volumes:
+      - ./memory:/app/memory
+      - app_data:/app/data
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
     depends_on:
-      - qdrant
+      - backend
 
 volumes:
-  qdrant_data:
+  app_data:

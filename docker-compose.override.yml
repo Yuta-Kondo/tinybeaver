@@ -1,0 +1,6 @@
+# Automatically loaded for local QA testing (docker compose up --build)
+# Exposes nginx on localhost:8080 — no cloudflared needed
+services:
+  nginx:
+    ports:
+      - "8080:80"
