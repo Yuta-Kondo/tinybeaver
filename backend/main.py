@@ -61,6 +61,9 @@ app.add_middleware(
 _client = anthropic.Anthropic()
 
 # Pricing per million tokens  (input, output)  — June 2026
+# Contact email used in outbound request headers and push VAPID claims.
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@example.com")
+
 _PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.00,  5.00),
     "claude-sonnet-4-6":         (3.00, 15.00),
@@ -162,7 +165,7 @@ def _geocode(address: str) -> dict | None:
         resp = httpx.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": address, "format": "json", "limit": 1},
-            headers={"User-Agent": "PersonalAgent/1.0 (kondoyutah15@gmail.com)"},
+            headers={"User-Agent": f"PersonalAgent/1.0 ({CONTACT_EMAIL})"},
             timeout=6,
         )
         data = resp.json()

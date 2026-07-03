@@ -10,6 +10,7 @@ services:
       - GMAIL_CLIENT_ID=${GMAIL_CLIENT_ID}
       - GMAIL_CLIENT_SECRET=${GMAIL_CLIENT_SECRET}
       - GMAIL_REDIRECT_URI=${GMAIL_REDIRECT_URI}
+      - CONTACT_EMAIL=${CONTACT_EMAIL}
     volumes:
       - ./memory:/app/memory
       - app_data:/app/data

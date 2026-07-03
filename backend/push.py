@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
-VAPID_CLAIMS = {"sub": "mailto:kondoyutah15@gmail.com"}
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@example.com")
+VAPID_CLAIMS = {"sub": f"mailto:{CONTACT_EMAIL}"}
 
 
 def send_push_to_all(title: str, body: str, url: str = "/") -> None:
