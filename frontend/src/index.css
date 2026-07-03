@@ -484,7 +484,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .message-row.assistant .message-bubble {
   padding: 4px 0;
-  max-width: 76%;
+  /* Fill the row width (the row's horizontal padding is the margin), so the
+     reply lines up with the composer instead of leaving a big right gutter.
+     Capped on ultra-wide screens to keep line length readable. */
+  max-width: min(100%, 1200px);
   font-size: 1rem;
   font-weight: 400;
   letter-spacing: 0.01em;
