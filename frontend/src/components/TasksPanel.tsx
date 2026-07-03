@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { type Task, createTask, deleteTask, fetchTasks, toggleTask } from "../lib/api";
+import Icon from "./Icon";
 
-const SCHEDULE_PRESETS = [
-  { label: "Daily at 09:00", value: "daily 09:00" },
-  { label: "Daily at 08:00", value: "daily 08:00" },
-  { label: "Weekly Mon 09:00", value: "weekly MON 09:00" },
-  { label: "Weekly Fri 17:00", value: "weekly FRI 17:00" },
-  { label: "Custom…", value: "custom" },
+const TIMES = [
+  { label: "Morning",      time: "8:00 AM",  emoji: "🌅", value: "daily 08:00" },
+  { label: "Lunch",        time: "12:00 PM", emoji: "☀️", value: "daily 12:00" },
+  { label: "Evening",      time: "6:00 PM",  emoji: "🌆", value: "daily 18:00" },
+  { label: "Before sleep", time: "10:00 PM", emoji: "🌙", value: "daily 22:00" },
 ];
 
 export default function TasksPanel() {
@@ -14,8 +14,7 @@ export default function TasksPanel() {
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [schedulePreset, setSchedulePreset] = useState(SCHEDULE_PRESETS[0].value);
-  const [customSchedule, setCustomSchedule] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set(["daily 08:00"]));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -26,14 +25,30 @@ export default function TasksPanel() {
 
   useEffect(() => { load(); }, []);
 
+  function toggleTime(value: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) {
+        if (next.size > 1) next.delete(value); // keep at least one
+      } else {
+        next.add(value);
+      }
+      return next;
+    });
+  }
+
   async function handleCreate() {
-    const schedule = schedulePreset === "custom" ? customSchedule.trim() : schedulePreset;
-    if (!title.trim() || !prompt.trim() || !schedule) { setError("All fields required."); return; }
+    if (!title.trim() || !prompt.trim() || selected.size === 0) {
+      setError("Title, prompt, and at least one time required.");
+      return;
+    }
+    // Join selected schedules in order
+    const schedule = TIMES.filter((t) => selected.has(t.value)).map((t) => t.value).join(",");
     setSaving(true); setError("");
     try {
       await createTask(title.trim(), prompt.trim(), schedule);
-      setCreating(false); setTitle(""); setPrompt(""); setCustomSchedule("");
-      setSchedulePreset(SCHEDULE_PRESETS[0].value);
+      setCreating(false); setTitle(""); setPrompt("");
+      setSelected(new Set(["daily 08:00"]));
       await load();
     } catch (e: any) {
       setError(e.message ?? "Failed to create task");
@@ -82,23 +97,20 @@ export default function TasksPanel() {
             onChange={(e) => setPrompt(e.target.value)}
             rows={3}
           />
-          <select
-            className="task-schedule-select"
-            value={schedulePreset}
-            onChange={(e) => setSchedulePreset(e.target.value)}
-          >
-            {SCHEDULE_PRESETS.map((p) => (
-              <option key={p.value} value={p.value}>{p.label}</option>
+          <div className="task-time-btns">
+            {TIMES.map((t) => (
+              <button
+                key={t.value}
+                className={`task-time-btn${selected.has(t.value) ? " task-time-btn--active" : ""}`}
+                onClick={() => toggleTime(t.value)}
+                type="button"
+              >
+                <span className="task-time-emoji">{t.emoji}</span>
+                <span className="task-time-label">{t.label}</span>
+                <span className="task-time-clock">{t.time}</span>
+              </button>
             ))}
-          </select>
-          {schedulePreset === "custom" && (
-            <input
-              className="task-input"
-              placeholder='e.g. "daily 14:30" or "weekly FRI 17:00"'
-              value={customSchedule}
-              onChange={(e) => setCustomSchedule(e.target.value)}
-            />
-          )}
+          </div>
           {error && <p className="task-error">{error}</p>}
           <div className="task-form-actions">
             <button className="task-save-btn" onClick={handleCreate} disabled={saving}>
@@ -134,7 +146,7 @@ export default function TasksPanel() {
                 className="task-delete-btn"
                 onClick={() => handleDelete(t.id)}
                 title="Delete task"
-              >✕</button>
+              ><Icon name="trash" size={13} /></button>
             </div>
           </div>
         ))}

@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-backend/
 venv/
 env/
 [0-9]*/
@@ -14,6 +15,7 @@ source/
 # Node
 node_modules/
 frontend/dist/
+*.tsbuildinfo
 
 # Tooling
 .pytest_cache/
@@ -27,6 +29,7 @@ frontend/dist/
 # Runtime data (DB, Claude memory files)
 data/
 memory/
+*.db
 
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json

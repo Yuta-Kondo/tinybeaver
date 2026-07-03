@@ -5,12 +5,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@types/leaflet": "^1.9.21",
+    "highlight.js": "^11.9.0",
     "katex": "^0.16.22",
     "leaflet": "^1.9.4",
+    "pdfjs-dist": "^4.0.379",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-leaflet": "^5.0.0",
@@ -21,11 +25,15 @@
     "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/katex": "^0.16.7",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^29.1.1",
     "typescript": "~5.6.2",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "vitest": "^4.1.9"
   }
 }

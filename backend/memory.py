@@ -98,12 +98,24 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     email       TEXT NOT NULL DEFAULT '',
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id          TEXT PRIMARY KEY,
+    endpoint    TEXT NOT NULL UNIQUE,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Migration: add columns that may not exist in older DBs
 _MIGRATIONS = [
     "ALTER TABLE topics ADD COLUMN embedding BLOB",
     "ALTER TABLE tasks ADD COLUMN created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    "ALTER TABLE messages ADD COLUMN moa_drafts TEXT",
+    "ALTER TABLE messages ADD COLUMN model TEXT",
+    "ALTER TABLE messages ADD COLUMN cost_usd REAL",
+    "ALTER TABLE messages ADD COLUMN cost_breakdown TEXT",
 ]
 
 
@@ -357,23 +369,35 @@ def update_session_summary(session_id: str, summary: str, through_count: int) ->
 # Messages API
 # ---------------------------------------------------------------------------
 
-def save_message(session_id: str, role: str, content: str | list) -> None:
+def save_message(session_id: str, role: str, content: str | list, moa_drafts: list | None = None) -> int:
     stored = content if isinstance(content, str) else json.dumps(content)
+    drafts_json = json.dumps(moa_drafts) if moa_drafts else None
     conn = _get_conn()
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, stored),
+    cur = conn.execute(
+        "INSERT INTO messages (session_id, role, content, moa_drafts) VALUES (?, ?, ?, ?)",
+        (session_id, role, stored, drafts_json),
     )
     conn.execute(
         "UPDATE sessions SET updated_at = datetime('now') WHERE session_id = ?",
         (session_id,),
     )
     conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_message_meta(msg_id: int, model: str, cost_usd: float, cost_breakdown: dict | None = None) -> None:
+    """Record which model produced an assistant reply and what it cost, so the
+    info survives a session reload."""
+    _get_conn().execute(
+        "UPDATE messages SET model = ?, cost_usd = ?, cost_breakdown = ? WHERE id = ?",
+        (model, cost_usd, json.dumps(cost_breakdown) if cost_breakdown else None, msg_id),
+    )
+    _get_conn().commit()
 
 
 def get_messages(session_id: str) -> list[dict]:
     rows = _get_conn().execute(
-        "SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY id",
+        "SELECT id, role, content, moa_drafts, model, cost_usd, cost_breakdown FROM messages WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
     result = []
@@ -388,7 +412,22 @@ def get_messages(session_id: str) -> list[dict]:
                 content = text or content
         except (json.JSONDecodeError, TypeError):
             pass
-        result.append({"id": r["id"], "role": r["role"], "content": content})
+        moa_drafts = None
+        if r["moa_drafts"]:
+            try:
+                moa_drafts = json.loads(r["moa_drafts"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        cost_breakdown = None
+        if r["cost_breakdown"]:
+            try:
+                cost_breakdown = json.loads(r["cost_breakdown"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result.append({
+            "id": r["id"], "role": r["role"], "content": content, "moa_drafts": moa_drafts,
+            "model": r["model"], "cost_usd": r["cost_usd"], "cost_breakdown": cost_breakdown,
+        })
     return result
 
 
@@ -514,4 +553,33 @@ def load_oauth_token(provider: str) -> dict | None:
 def delete_oauth_token(provider: str) -> None:
     conn = _get_conn()
     conn.execute("DELETE FROM oauth_tokens WHERE provider = ?", (provider,))
+    conn.commit()
+
+
+# ── Push subscriptions ────────────────────────────────────────────────────────
+
+def save_push_subscription(endpoint: str, p256dh: str, auth: str) -> None:
+    import uuid
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO push_subscriptions (id, endpoint, p256dh, auth)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(endpoint) DO UPDATE SET
+               p256dh = excluded.p256dh,
+               auth   = excluded.auth""",
+        (str(uuid.uuid4()), endpoint, p256dh, auth),
+    )
+    conn.commit()
+
+
+def list_push_subscriptions() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT endpoint, p256dh, auth FROM push_subscriptions"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_push_subscription(endpoint: str) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
     conn.commit()

@@ -14,9 +14,9 @@ echo "==> Transferring memory files..."
 rsync -az --delete memory/ root@$VPS_IP:$REMOTE/memory/
 
 echo "==> Transferring SQLite database..."
-# Copy to a temp path first, then move atomically
-rsync -az data/memory.db root@$VPS_IP:/tmp/memory.db
-ssh root@$VPS_IP "mv /tmp/memory.db $REMOTE/data/memory.db && chown root:root $REMOTE/data/memory.db && chmod 600 $REMOTE/data/memory.db"
+# data/ uses a Docker named volume — must copy via the container, not host filesystem
+scp data/memory.db root@$VPS_IP:/tmp/memory.db
+ssh root@$VPS_IP "docker cp /tmp/memory.db app-backend-1:/app/data/memory.db && rm /tmp/memory.db"
 
 echo "==> Restarting backend..."
 ssh root@$VPS_IP "cd $REMOTE && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d backend"

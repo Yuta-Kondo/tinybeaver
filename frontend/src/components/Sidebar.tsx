@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SessionInfo, SessionSearchResult } from "../lib/api";
-import { searchSessions } from "../lib/api";
+import { renameSession, searchSessions } from "../lib/api";
+import Icon from "./Icon";
 import TopicsPanel from "./TopicsPanel";
 import TasksPanel from "./TasksPanel";
 import GmailPanel from "./GmailPanel";
@@ -11,11 +12,28 @@ interface Props {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onRenamed: (id: string, title: string) => void;
   onSendToChat: (text: string) => void;
   isOpen?: boolean;
 }
 
-export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, onSendToChat, isOpen }: Props) {
+export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, onRenamed, onSendToChat, isOpen }: Props) {
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  function startRename(id: string, current: string) {
+    setRenamingId(id);
+    setRenameDraft(current);
+  }
+  async function commitRename(id: string) {
+    const title = renameDraft.trim();
+    setRenamingId(null);
+    if (!title) return;
+    try {
+      await renameSession(id, title);
+      onRenamed(id, title);
+    } catch { /* ignore */ }
+  }
   const [tab, setTab] = useState<"chats" | "memory" | "tasks" | "email">("chats");
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<SessionSearchResult[]>([]);
@@ -35,8 +53,17 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
       setTab("chats");
       setTimeout(() => searchInputRef.current?.focus(), 50);
     }
+    function onOpenTab(e: Event) {
+      const tab = (e as CustomEvent).detail as "chats" | "memory" | "tasks" | "email";
+      setTab(tab);
+      if (tab === "chats") setTimeout(() => searchInputRef.current?.focus(), 50);
+    }
     window.addEventListener("focus-search", onFocusSearch);
-    return () => window.removeEventListener("focus-search", onFocusSearch);
+    window.addEventListener("open-sidebar-tab", onOpenTab);
+    return () => {
+      window.removeEventListener("focus-search", onFocusSearch);
+      window.removeEventListener("open-sidebar-tab", onOpenTab);
+    };
   }, []);
 
   useEffect(() => {
@@ -67,7 +94,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
             <button className="new-chat-btn" onClick={onNew}>+ New chat</button>
             <div className="shortcut-bar">
               <span className="shortcut-item"><kbd className="kbd">⌘⇧O</kbd> <span>new chat</span></span>
-              <span className="shortcut-item"><kbd className="kbd">⌘K</kbd> <span>search</span></span>
+              <span className="shortcut-item"><kbd className="kbd">⌘K</kbd> <span>commands</span></span>
             </div>
           </>
         )}
@@ -92,10 +119,28 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
                 <div
                   key={s.session_id}
                   className={`session-item ${s.session_id === activeId ? "active" : ""}`}
-                  onClick={() => onSelect(s.session_id)}
+                  onClick={() => renamingId === s.session_id ? undefined : onSelect(s.session_id)}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="session-item-title">{s.title}</div>
+                    {renamingId === s.session_id ? (
+                      <input
+                        className="session-rename-input"
+                        value={renameDraft}
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={() => commitRename(s.session_id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") { e.preventDefault(); commitRename(s.session_id); }
+                          if (e.key === "Escape") { e.preventDefault(); setRenamingId(null); }
+                        }}
+                      />
+                    ) : (
+                      <div
+                        className="session-item-title"
+                        onDoubleClick={(e) => { e.stopPropagation(); startRename(s.session_id, s.title); }}
+                      >{s.title}</div>
+                    )}
                     {s.snippet && (
                       <div
                         className="session-search-snippet"
@@ -103,11 +148,20 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
                       />
                     )}
                   </div>
-                  <button
-                    className="session-delete-btn"
-                    onClick={(e) => { e.stopPropagation(); onDelete(s.session_id); }}
-                    title="Delete"
-                  >×</button>
+                  {renamingId !== s.session_id && (
+                    <>
+                      <button
+                        className="session-rename-btn"
+                        onClick={(e) => { e.stopPropagation(); startRename(s.session_id, s.title); }}
+                        title="Rename"
+                      ><Icon name="edit" size={13} /></button>
+                      <button
+                        className="session-delete-btn"
+                        onClick={(e) => { e.stopPropagation(); onDelete(s.session_id); }}
+                        title="Delete"
+                      ><Icon name="trash" size={13} /></button>
+                    </>
+                  )}
                 </div>
               ))
             )}

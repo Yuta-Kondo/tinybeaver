@@ -8,6 +8,7 @@ import {
   gmailStartAuth,
   gmailStatus,
 } from "../lib/api";
+import Icon from "./Icon";
 
 interface Props {
   onSendToChat?: (text: string) => void;
@@ -125,7 +126,7 @@ export default function GmailPanel({ onSendToChat }: Props) {
     <div className="gmail-panel">
       <div className="gmail-header">
         <span className="gmail-account">{status.email}</span>
-        <button className="gmail-disconnect" onClick={disconnect} title="Disconnect">✕</button>
+        <button className="gmail-disconnect" onClick={disconnect} title="Disconnect"><Icon name="close" size={13} /></button>
       </div>
 
       <div className="gmail-search-wrap">

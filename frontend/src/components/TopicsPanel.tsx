@@ -11,6 +11,7 @@ import {
   searchTopics,
   semanticSearchTopics,
 } from "../lib/api";
+import Icon from "./Icon";
 
 export default function TopicsPanel() {
   const [topics, setTopics] = useState<TopicSummary[]>([]);
@@ -173,7 +174,7 @@ export default function TopicsPanel() {
               autoFocus
             />
             <button className="icon-btn" onClick={handleCreate} title="Create">✓</button>
-            <button className="icon-btn" onClick={() => { setCreatingNew(false); setNewSlug(""); }} title="Cancel">✕</button>
+            <button className="icon-btn" onClick={() => { setCreatingNew(false); setNewSlug(""); }} title="Cancel"><Icon name="close" size={13} /></button>
           </div>
         ) : (
           <button className="topics-footer-btn" onClick={() => setCreatingNew(true)}>
@@ -208,7 +209,7 @@ export default function TopicsPanel() {
                 ? new Date(selected.updated_at).toLocaleString()
                 : ""}
             </div>
-            <button className="icon-btn" onClick={() => setSelected(null)} title="Close">✕</button>
+            <button className="icon-btn" onClick={() => setSelected(null)} title="Close"><Icon name="close" size={13} /></button>
           </div>
           <textarea
             className="topic-editor-textarea"

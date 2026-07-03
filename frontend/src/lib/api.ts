@@ -11,15 +11,20 @@ export interface SessionSearchResult {
 }
 
 export interface GeoLocation {
-  address: string;
-  lat: number;
-  lng: number;
-  display_name: string;
+  name: string;
+  query: string;
+  // legacy fields kept for compatibility
+  address?: string;
+  lat?: number;
+  lng?: number;
+  display_name?: string;
 }
 
 export interface StreamEvent {
-  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating" | "reading_email";
+  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing" | "moa_draft" | "moa_draft_delta" | "moa_agent_done";
   session_id?: string;
+  message_id?: number | null;
+  user_message_id?: number | null;
   text?: string;
   message?: string;
   new_topic?: string;
@@ -31,6 +36,8 @@ export interface StreamEvent {
   cost_breakdown?: { chat: number; memory: number };
   locations?: GeoLocation[];
   search_sources?: { n: number; url: string; title: string }[];
+  moa_persona?: string;
+  moa_text?: string;
 }
 
 export interface TopicSummary {
@@ -80,6 +87,42 @@ export async function deleteSession(id: string): Promise<void> {
   await fetch(`/sessions/${id}`, { method: "DELETE" });
 }
 
+export async function appendMessage(id: string, role: "assistant" | "user", content: string): Promise<number | null> {
+  try {
+    const r = await fetch(`/sessions/${id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role, content }),
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function renameSession(id: string, title: string): Promise<void> {
+  const r = await fetch(`/sessions/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!r.ok) throw new Error("Failed to rename session");
+}
+
+export async function sendFeedback(
+  rating: "up" | "down",
+  message: string,
+  note = ""
+): Promise<void> {
+  await fetch("/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rating, message, note }),
+  });
+}
+
 export async function searchSessions(q: string): Promise<SessionSearchResult[]> {
   const r = await fetch(`/sessions/search?q=${encodeURIComponent(q)}`);
   if (!r.ok) return [];
@@ -89,7 +132,7 @@ export async function searchSessions(q: string): Promise<SessionSearchResult[]> 
 
 export async function fetchSessionMessages(
   id: string
-): Promise<Array<{ id: number; role: "user" | "assistant"; content: string }>> {
+): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; moa_drafts?: { persona: string; text: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
   const r = await fetch(`/sessions/${id}/messages`);
   if (!r.ok) return [];
   const data = await r.json();
@@ -280,7 +323,12 @@ export function streamChat(
   sessionId: string | null,
   onEvent: (e: StreamEvent) => void,
   images: string[] = [],
-  files: AttachedFile[] = []
+  files: AttachedFile[] = [],
+  model = "claude-sonnet-4-6",
+  multiAgent = false,
+  privateMode = false,
+  history: { role: string; content: string }[] = [],
+  continueMessageId: number | null = null
 ): () => void {
   const controller = new AbortController();
 
@@ -288,7 +336,7 @@ export function streamChat(
     const resp = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: sessionId, images, files }),
+      body: JSON.stringify({ message, session_id: sessionId, images, files, model, multi_agent: multiAgent, private: privateMode, history, continue_message_id: continueMessageId }),
       signal: controller.signal,
     });
 

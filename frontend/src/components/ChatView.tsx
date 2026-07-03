@@ -1,23 +1,101 @@
-import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef, useCallback } from "react";
 import MessageBubble from "./MessageBubble";
+import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
 import { deleteMessage, extractFile } from "../lib/api";
+import { renderPdfThumbnail } from "../lib/pdfThumb";
 
 interface PendingFile extends AttachedFile {
+  key: string;
   sizeKb: number;
   costUsd?: number;
   loading?: boolean;
+  thumb?: string;  // first-page preview for PDFs
+}
+
+const MODELS = [
+  { id: "claude-haiku-4-5-20251001", name: "Haiku",  version: "4.5", provider: "anthropic", desc: "Fast & efficient" },
+  { id: "claude-sonnet-4-6",         name: "Sonnet", version: "4.6", provider: "anthropic", desc: "Balanced" },
+  { id: "claude-sonnet-5",           name: "Sonnet", version: "5",   provider: "anthropic", desc: "Recommended" },
+  { id: "claude-opus-4-8",           name: "Opus",   version: "4.8", provider: "anthropic", desc: "Most capable" },
+  { id: "gemini-3.5-flash",          name: "Flash",  version: "3.5", provider: "gemini",    desc: "Google · Fast" },
+];
+
+function ModelDropdown({ model, onModelChange, disabled }: { model: string; onModelChange: (m: string) => void; disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const active = MODELS.find((m) => m.id === model) ?? MODELS[1];
+
+  const close = useCallback(() => setOpen(false), []);
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open, close]);
+
+  return (
+    <div className="model-dropdown" ref={ref}>
+      <button
+        className="model-dropdown-btn"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        type="button"
+        disabled={disabled}
+      >
+        <span className={`model-dropdown-dot model-dropdown-dot--${active.provider}`} />
+        <span className="model-dropdown-name">{active.name}</span>
+        <span className="model-dropdown-version">{active.version}</span>
+        <svg className={`model-dropdown-chevron${open ? " open" : ""}`} viewBox="0 0 10 6" fill="none">
+          <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+
+      {open && (
+        <div className="model-dropdown-menu">
+          {MODELS.map((m) => (
+            <button
+              key={m.id}
+              className={`model-option${model === m.id ? " model-option--active" : ""}`}
+              onClick={() => { onModelChange(m.id); setOpen(false); }}
+              type="button"
+            >
+              <span className={`model-dropdown-dot model-dropdown-dot--${m.provider}`} />
+              <span className="model-option-body">
+                <span className="model-option-title">
+                  {m.name} <span className="model-option-version">{m.version}</span>
+                </span>
+                <span className="model-option-desc">{m.desc}</span>
+              </span>
+              {model === m.id && <span className="model-option-check">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface Props {
   messages: Message[];
   streaming: boolean;
+  loadingSession: boolean;
   sessionId: string | null;
   onSend: (text: string, images: string[], files: AttachedFile[]) => void;
   onCancel: () => void;
   onResend: (msgId: number, newContent: string) => void;
+  onRetry: () => void;
+  onContinue: (msgId: number) => void;
   onMenuOpen: () => void;
+  model: string;
+  onModelChange: (m: string) => void;
+  multiAgent: boolean;
+  onMultiAgentChange: (v: boolean) => void;
+  privateMode: boolean;
+  privateLocked: boolean;
+  onPrivateModeChange: (v: boolean) => void;
 }
 
 export interface ChatViewHandle {
@@ -71,11 +149,25 @@ function fileIcon(name: string) {
   return "📎";
 }
 
-const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, sessionId, onSend, onCancel, onResend, onMenuOpen }, ref) {
-  const [draft, setDraft] = useState("");
+const draftKey = (sid: string | null) => `draft:${sid ?? "new"}`;
+
+// Web Speech API (Chrome/Safari expose webkit-prefixed). Undefined elsewhere.
+const SpeechRecognitionImpl: any =
+  typeof window !== "undefined"
+    ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    : undefined;
+
+const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, loadingSession, sessionId, onSend, onCancel, onResend, onRetry, onContinue, onMenuOpen, model, onModelChange, multiAgent, onMultiAgentChange, privateMode, privateLocked, onPrivateModeChange }, ref) {
+  const [draft, setDraft] = useState(() => {
+    try { return localStorage.getItem(draftKey(sessionId)) ?? ""; } catch { return ""; }
+  });
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [pdfPreview, setPdfPreview] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -114,10 +206,28 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     }
   }, [messages.length === 0]);
 
+  // Restore the saved draft when switching sessions (private mode is never persisted).
+  useEffect(() => {
+    if (privateMode) return;
+    try { setDraft(localStorage.getItem(draftKey(sessionId)) ?? ""); } catch { setDraft(""); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Persist the draft as it changes (skip private mode — nothing leaves memory).
+  useEffect(() => {
+    if (privateMode) return;
+    try {
+      if (draft) localStorage.setItem(draftKey(sessionId), draft);
+      else localStorage.removeItem(draftKey(sessionId));
+    } catch { /* ignore quota errors */ }
+  }, [draft, sessionId, privateMode]);
+
   function handleScroll() {
     const el = scrollRef.current;
     if (!el) return;
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    pinnedRef.current = atBottom;
+    setShowScrollBtn(!atBottom && el.scrollHeight - el.clientHeight > 200);
   }
 
   useEffect(() => {
@@ -129,6 +239,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
   function snapToBottom() {
     pinnedRef.current = true;
+    setShowScrollBtn(false);
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
@@ -148,21 +259,29 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     }
 
     // Show chip in loading state immediately
-    const placeholder: PendingFile = { name: file.name, text: "", sizeKb: 0, loading: true };
+    const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const placeholder: PendingFile = { key, name: file.name, text: "", sizeKb: 0, loading: true };
     setPendingFiles((p) => [...p, placeholder]);
+
+    // For PDFs, render a first-page thumbnail in parallel with text extraction.
+    if (ext === "pdf") {
+      renderPdfThumbnail(file).then((thumb) => {
+        if (thumb) setPendingFiles((p) => p.map((f) => (f.key === key ? { ...f, thumb } : f)));
+      });
+    }
 
     try {
       const result = await extractFile(file);
       setPendingFiles((p) =>
         p.map((f) =>
-          f === placeholder
-            ? { name: result.filename, text: result.text, sizeKb: result.size_kb, costUsd: result.cost_usd, loading: false }
+          f.key === key
+            ? { ...f, name: result.filename, text: result.text, sizeKb: result.size_kb, costUsd: result.cost_usd, loading: false }
             : f
         )
       );
     } catch (e: any) {
       // Remove placeholder and show error
-      setPendingFiles((p) => p.filter((f) => f !== placeholder));
+      setPendingFiles((p) => p.filter((f) => f.key !== key));
       alert(`Could not read "${file.name}": ${e.message}`);
     }
   }
@@ -217,6 +336,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     const imgs = pendingImages;
     const files = pendingFiles.filter((f) => !f.loading).map(({ name, text }) => ({ name, text }));
     setDraft("");
+    try { localStorage.removeItem(draftKey(sessionId)); } catch { /* ignore */ }
     setPendingImages([]);
     setPendingFiles([]);
     snapToBottom();
@@ -229,6 +349,35 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     const el = e.target;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }
+
+  // ── Voice input (Web Speech API) ────────────────────
+  function toggleVoice() {
+    if (listening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    if (!SpeechRecognitionImpl) return;
+    const rec = new SpeechRecognitionImpl();
+    rec.lang = navigator.language || "en-US";
+    rec.interimResults = true;
+    rec.continuous = false;
+    const baseDraft = draft ? draft + " " : "";
+    let finalText = "";
+    rec.onresult = (e: any) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += t;
+        else interim += t;
+      }
+      setDraft(baseDraft + finalText + interim);
+    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => { setListening(false); recognitionRef.current = null; };
+    recognitionRef.current = rec;
+    setListening(true);
+    rec.start();
   }
 
   function removeImage(idx: number) {
@@ -247,7 +396,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
   return (
     <div
-      className={`chat-area${dragOver ? " drag-over" : ""}`}
+      className={`chat-area${dragOver ? " drag-over" : ""}${privateMode ? " chat-area--private" : ""}`}
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
@@ -258,31 +407,107 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         </div>
       )}
 
+      {/* Desktop topbar — hidden on mobile (mobile-header handles it) */}
+      <div className="chat-topbar">
+        <button
+          className={`private-toggle private-toggle--topbar${privateMode ? " private-toggle--active" : ""}`}
+          onClick={() => onPrivateModeChange(!privateMode)}
+          type="button"
+          disabled={streaming || privateLocked}
+          title={privateLocked ? "Private mode is locked for this conversation" : "Private mode · conversation won't be saved to memory"}
+        >
+          <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
+            <path d="M8 1.5C5.5 1.5 3.5 3.7 3.5 6.5c0 1 .3 2 .8 2.8L3 11c-.3.5 0 1 .6 1H5l.5 1.5c.2.5.7.5 1 0L7 12h2l.5 1.5c.2.5.7.5 1 0L11 11h1.4c.6 0 .9-.5.6-1l-1.3-1.7c.5-.8.8-1.8.8-2.8 0-2.8-2-5-4.5-5z" fill="currentColor"/>
+            <circle cx="6" cy="7" r="1" fill="white" opacity="0.6"/>
+            <circle cx="10" cy="7" r="1" fill="white" opacity="0.6"/>
+          </svg>
+          Private
+        </button>
+      </div>
+
+      {/* Mobile header — hidden on desktop */}
       <div className="mobile-header">
         <button className="hamburger-btn" onClick={onMenuOpen} aria-label="Open menu">
           <span /><span /><span />
         </button>
         <span className="mobile-title">tinybeaver</span>
+        <button
+          className={`private-toggle private-toggle--topbar${privateMode ? " private-toggle--active" : ""}`}
+          onClick={() => onPrivateModeChange(!privateMode)}
+          type="button"
+          disabled={streaming || privateLocked}
+          title={privateLocked ? "Private mode is locked for this conversation" : "Private mode · conversation won't be saved to memory"}
+        >
+          <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
+            <path d="M8 1.5C5.5 1.5 3.5 3.7 3.5 6.5c0 1 .3 2 .8 2.8L3 11c-.3.5 0 1 .6 1H5l.5 1.5c.2.5.7.5 1 0L7 12h2l.5 1.5c.2.5.7.5 1 0L11 11h1.4c.6 0 .9-.5.6-1l-1.3-1.7c.5-.8.8-1.8.8-2.8 0-2.8-2-5-4.5-5z" fill="currentColor"/>
+            <circle cx="6" cy="7" r="1" fill="white" opacity="0.6"/>
+            <circle cx="10" cy="7" r="1" fill="white" opacity="0.6"/>
+          </svg>
+          Private
+        </button>
       </div>
 
+      {privateMode && (
+        <div className="private-banner">
+          <svg viewBox="0 0 20 20" fill="none" width="14" height="14" aria-hidden="true">
+            <path d="M10 2C7 2 4.5 4.5 4.5 8v1H3a1 1 0 00-1 1v7a1 1 0 001 1h14a1 1 0 001-1V10a1 1 0 00-1-1h-1.5V8C15.5 4.5 13 2 10 2zm0 2c2 0 3.5 1.5 3.5 4v1h-7V8C6.5 5.5 8 4 10 4z" fill="currentColor" opacity="0.7"/>
+            <circle cx="10" cy="13.5" r="1.5" fill="currentColor" opacity="0.5"/>
+          </svg>
+          Private · this conversation won't be saved to memory
+        </div>
+      )}
+
       <div className="messages" ref={scrollRef} onScroll={handleScroll}>
-        {messages.length === 0 ? (
+        {loadingSession ? (
+          <div className="session-skeleton" aria-label="Loading conversation">
+            <div className="skeleton-row skeleton-row--user"><div className="skeleton-line" style={{ width: "38%" }} /></div>
+            <div className="skeleton-row"><div className="skeleton-line" style={{ width: "82%" }} /><div className="skeleton-line" style={{ width: "70%" }} /><div className="skeleton-line" style={{ width: "48%" }} /></div>
+            <div className="skeleton-row skeleton-row--user"><div className="skeleton-line" style={{ width: "30%" }} /></div>
+            <div className="skeleton-row"><div className="skeleton-line" style={{ width: "76%" }} /><div className="skeleton-line" style={{ width: "60%" }} /></div>
+          </div>
+        ) : messages.length === 0 ? (
             <div className="empty-state">
-              <h2>Be humble, be strong.</h2>
+              <img src="/favicon.png" alt="tinybeaver" className={`empty-state-logo${privateMode ? " empty-state-logo--private" : ""}`} />
             </div>
         ) : (
-          messages.map((m, i) => (
-            <MessageBubble
-              key={m.id ?? i}
-              message={m}
-              sessionId={sessionId}
-              onResend={onResend}
-              onDelete={handleDeleteMsg}
-            />
-          ))
+          messages.map((m, i) => {
+            // Regenerate re-runs the user turn preceding this assistant message.
+            let onRegenerate: (() => void) | undefined;
+            if (m.role === "assistant" && m.id && !streaming) {
+              for (let j = i - 1; j >= 0; j--) {
+                const prev = messages[j];
+                if (prev.role === "user" && prev.id) {
+                  const uid = prev.id;
+                  const utext = prev.content;
+                  onRegenerate = () => onResend(uid, utext);
+                  break;
+                }
+              }
+            }
+            return (
+              <MessageBubble
+                key={m.id ?? i}
+                message={m}
+                sessionId={sessionId}
+                onResend={onResend}
+                onRegenerate={onRegenerate}
+                onRetry={m.isError ? onRetry : undefined}
+                onContinue={m.stopped && m.id && !streaming ? () => onContinue(m.id!) : undefined}
+                onDelete={handleDeleteMsg}
+              />
+            );
+          })
         )}
         <div ref={bottomRef} />
       </div>
+
+      {showScrollBtn && (
+        <button className="scroll-bottom-btn" onClick={snapToBottom} title="Jump to latest" aria-label="Jump to latest">
+          <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+            <path d="M8 2.5v9m0 0L4 7.5m4 4l4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+      )}
 
       <div className="input-bar">
         {/* Image previews */}
@@ -291,7 +516,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             {pendingImages.map((src, i) => (
               <div key={i} className="image-preview-wrap">
                 <img src={src} alt={`pasted ${i + 1}`} className="image-preview" />
-                <button className="image-remove" onClick={() => removeImage(i)} title="Remove">✕</button>
+                <button className="image-remove" onClick={() => removeImage(i)} title="Remove"><Icon name="close" size={11} /></button>
               </div>
             ))}
           </div>
@@ -301,8 +526,10 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         {pendingFiles.length > 0 && (
           <div className="file-chips">
             {pendingFiles.map((f, i) => (
-              <div key={i} className={`file-chip${f.loading ? " file-chip--loading" : ""}`}>
-                <span className="file-chip-icon">{f.loading ? "⏳" : fileIcon(f.name)}</span>
+              <div key={f.key ?? i} className={`file-chip${f.loading ? " file-chip--loading" : ""}${f.thumb ? " file-chip--pdf" : ""}`}>
+                {f.thumb
+                  ? <img src={f.thumb} alt="Preview" className="file-chip-thumb" title="Click to preview" onClick={() => setPdfPreview(f.thumb!)} />
+                  : <span className="file-chip-icon">{f.loading ? "⏳" : fileIcon(f.name)}</span>}
                 <div className="file-chip-info">
                   <span className="file-chip-name">{f.name}</span>
                   {!f.loading && (
@@ -314,7 +541,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
                   {f.loading && <span className="file-chip-size">Extracting…</span>}
                 </div>
                 {!f.loading && (
-                  <button className="file-chip-remove" onClick={() => removeFile(i)} title="Remove">✕</button>
+                  <button className="file-chip-remove" onClick={() => removeFile(i)} title="Remove"><Icon name="close" size={11} /></button>
                 )}
               </div>
             ))}
@@ -328,7 +555,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             disabled={streaming || isLoading}
             title="Attach file (PDF, CSV, TXT, image)"
           >
-            ⊕
+            <Icon name="attach" size={17} />
           </button>
           <input
             ref={fileInputRef}
@@ -367,14 +594,55 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
               }
             }}
           />
+          {SpeechRecognitionImpl && !streaming && (
+            <button
+              className={`voice-btn${listening ? " voice-btn--active" : ""}`}
+              onClick={toggleVoice}
+              type="button"
+              title={listening ? "Stop dictation" : "Dictate"}
+              aria-label={listening ? "Stop dictation" : "Dictate"}
+            >
+              <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+                <rect x="6" y="1.5" width="4" height="8" rx="2" fill="currentColor"/>
+                <path d="M3.5 7a4.5 4.5 0 009 0M8 11.5v3M5.5 14.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </svg>
+            </button>
+          )}
           {streaming ? (
-            <button className="send-btn" onClick={onCancel} title="Stop">■</button>
+            <button className="send-btn" onClick={onCancel} title="Stop"><Icon name="stop" size={14} /></button>
           ) : (
-            <button className="send-btn" onClick={submit} disabled={!canSend} title="Send (Enter)">↑</button>
+            <button className="send-btn" onClick={submit} disabled={!canSend} title="Send (Enter)"><Icon name="send" size={17} /></button>
           )}
         </div>
-        <p className="input-hint desktop-only">Enter to send · Shift+Enter for newline · Drop or ⊕ to attach file</p>
+        <div className="model-selector-row">
+          <div className="model-selector-left">
+            <ModelDropdown model={model} onModelChange={onModelChange} disabled={streaming || multiAgent} />
+            <button
+              className={`moa-toggle${multiAgent ? " moa-toggle--active" : ""}`}
+              onClick={() => onMultiAgentChange(!multiAgent)}
+              type="button"
+              disabled={streaming}
+              title="Multi-agent: 3×Gemini Flash → Sonnet synthesis"
+            >
+              <svg viewBox="0 0 14 14" fill="none" width="12" height="12">
+                <circle cx="3" cy="7" r="2" fill="currentColor" opacity="0.7"/>
+                <circle cx="7" cy="3" r="2" fill="currentColor" opacity="0.7"/>
+                <circle cx="11" cy="7" r="2" fill="currentColor" opacity="0.7"/>
+                <path d="M5 7h2M7 5v2M7 7l2 0" stroke="currentColor" strokeWidth="1" opacity="0.5"/>
+              </svg>
+              Multi
+            </button>
+          </div>
+          <span className="input-hint-inline desktop-only">Enter to send · Shift+Enter for newline</span>
+        </div>
       </div>
+
+      {pdfPreview && (
+        <div className="lightbox-backdrop" onClick={() => setPdfPreview(null)}>
+          <img src={pdfPreview} alt="PDF preview" className="lightbox-img" />
+          <button className="lightbox-close" onClick={() => setPdfPreview(null)} aria-label="Close"><Icon name="close" /></button>
+        </div>
+      )}
     </div>
   );
 });

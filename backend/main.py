@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import io
 import json
 import os
@@ -42,6 +43,7 @@ from .memory import (
     search_topics,
     toggle_task,
     topic_descriptions,
+    update_message_meta,
     update_session_summary,
     update_session_title,
     update_task_next_run,
@@ -60,14 +62,22 @@ _client = anthropic.Anthropic()
 
 # Pricing per million tokens  (input, output)  — June 2026
 _PRICING: dict[str, tuple[float, float]] = {
-    "claude-sonnet-4-6":        (3.00, 15.00),
     "claude-haiku-4-5-20251001": (1.00,  5.00),
-    "claude-opus-4-8":          (5.00, 25.00),
+    "claude-sonnet-4-6":         (3.00, 15.00),
+    "claude-opus-4-8":           (5.00, 25.00),
+    "gemini-3.5-flash":          (1.50,  9.00),
 }
+# Sonnet 5 introductory pricing until Aug 31 2026, standard after
+_SONNET5_INTRO = (2.00, 10.00)
+_SONNET5_STANDARD = (3.00, 15.00)
+_SONNET5_INTRO_END = _dt.date(2026, 8, 31)
 
 
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    p_in, p_out = _PRICING.get(model, (3.00, 15.00))
+    if model == "claude-sonnet-5":
+        p_in, p_out = _SONNET5_INTRO if _dt.date.today() <= _SONNET5_INTRO_END else _SONNET5_STANDARD
+    else:
+        p_in, p_out = _PRICING.get(model, (3.00, 15.00))
     return round((input_tokens * p_in + output_tokens * p_out) / 1_000_000, 6)
 
 
@@ -84,6 +94,11 @@ To explicitly save a fact to memory mid-response, write:
 This works for any existing topic slug. Use sparingly — only for personal facts \
 about Yuta (preferences, decisions, plans, experiences). Never save general \
 knowledge, definitions, or facts that could be looked up online.
+
+When you mention a specific place the user would want to visit (a store, restaurant, \
+venue, address), add a map marker on its own line:
+[[MAP:Place Name, City]]
+Only use this for concrete, visitable places — not general areas or hypothetical addresses.
 
 """
 
@@ -109,6 +124,7 @@ def startup():
 
 _MENTION_RE = re.compile(r'@([\w-]+)')
 _SAVE_RE = re.compile(r'\[\[SAVE:([\w-]+):([^\]]+)\]\]')
+_MAP_RE = re.compile(r'\[\[MAP:([^\]]+)\]\]')
 _URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
 _ADDRESS_RE = re.compile(
     r'\b\d{1,5}\s+(?:[A-Za-z]+\.?\s+){1,4}'
@@ -194,6 +210,21 @@ def _extract_saves(text: str) -> list[tuple[str, str]]:
 
 def _strip_saves(text: str) -> str:
     return _SAVE_RE.sub("", text).strip()
+
+
+def _extract_maps(text: str) -> list[dict]:
+    seen: set[str] = set()
+    results = []
+    for m in _MAP_RE.finditer(text):
+        query = m.group(1).strip()
+        if query not in seen:
+            seen.add(query)
+            results.append({"name": query, "query": query})
+    return results
+
+
+def _strip_maps(text: str) -> str:
+    return _MAP_RE.sub("", text).strip()
 
 
 def _build_system(context: str, summary: str) -> list[dict]:
@@ -396,25 +427,46 @@ def _extract_urls(message: str) -> list[str]:
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
-    save_session(session_id)
+    # Continue mode: resume a stopped assistant reply (Claude only, non-private).
+    is_continue = bool(req.continue_message_id) and not req.private
 
-    all_topics = available_topics()
-    mentioned = _parse_mentions(req.message, all_topics)
-    relevant_topics, new_topic = classify(req.message)
+    if is_continue:
+        # History already ends with the partial assistant message; the model
+        # continues from it (assistant prefill). No new user turn is added.
+        all_topics = []
+        relevant_topics = []
+        new_topic = None
+        update_topics = []
+        api_messages, summary = get_api_messages(session_id)
+        system = _build_system("", summary)
+    elif req.private:
+        # Private mode: no DB, no memory
+        all_topics = []
+        relevant_topics = []
+        new_topic = None
+        update_topics = []
+        system = _build_system("", "")
+        api_messages = [{"role": m.role, "content": m.content} for m in req.history]
+    else:
+        save_session(session_id)
 
-    forced = set(mentioned)
-    relevant_topics = list(forced | set(relevant_topics))
+        all_topics = available_topics()
+        mentioned = _parse_mentions(req.message, all_topics)
+        relevant_topics, new_topic = classify(req.message)
 
-    if new_topic:
-        try:
-            create_topic(new_topic)
-        except ValueError:
-            new_topic = None
+        forced = set(mentioned)
+        relevant_topics = list(forced | set(relevant_topics))
 
-    update_topics = relevant_topics + ([new_topic] if new_topic else [])
-    context = load_context(relevant_topics)
-    api_messages, summary = get_api_messages(session_id)
-    system = _build_system(context, summary)
+        if new_topic:
+            try:
+                create_topic(new_topic)
+            except ValueError:
+                new_topic = None
+
+        update_topics = relevant_topics + ([new_topic] if new_topic else [])
+        context = load_context(relevant_topics)
+        api_messages, summary = get_api_messages(session_id)
+        system = _build_system(context, summary)
 
     # Fetch URLs in message
     urls = _extract_urls(req.message)
@@ -447,14 +499,32 @@ def chat_stream(req: ChatRequest):
     if req.message:
         user_content.append({"type": "text", "text": req.message})
 
-    save_message(session_id, "user", req.message)
+    user_msg_id = None
+    if not req.private and not is_continue:
+        user_msg_id = save_message(session_id, "user", req.message)
+        session = get_session(session_id)
+        if session and not session["title"]:
+            update_session_title(session_id, req.message[:60].strip())
 
-    session = get_session(session_id)
-    if session and not session["title"]:
-        update_session_title(session_id, req.message[:60].strip())
-
-    messages_for_api = api_messages + [{"role": "user", "content": user_content}]
-    _MODEL = "claude-sonnet-4-6"
+    if is_continue:
+        # api_messages already ends with the partial assistant reply. Thinking
+        # models reject assistant prefill, so we add an explicit user instruction
+        # to continue; the streamed continuation is merged into that same message.
+        messages_for_api = api_messages + [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Continue your previous response exactly from where you left off. "
+                        "Do not repeat, re-introduce, or summarize anything you already wrote — "
+                        "output only the continuation so it appends seamlessly.",
+            }],
+        }]
+    else:
+        messages_for_api = api_messages + [{"role": "user", "content": user_content}]
+    from .models import ALLOWED_MODELS, DEFAULT_MODEL
+    _MODEL = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+    if is_continue and _MODEL.startswith("gemini"):
+        _MODEL = DEFAULT_MODEL  # continuation runs on Claude
 
     # Gmail client-side tools (only added when Gmail is connected)
     def _gmail_tools() -> list[dict]:
@@ -504,6 +574,7 @@ def chat_stream(req: ChatRequest):
             "type": "start",
             "session_id": session_id,
             "loaded_topics": relevant_topics,
+            "user_message_id": user_msg_id,
         }
         if new_topic:
             meta["new_topic"] = new_topic
@@ -587,51 +658,362 @@ def chat_stream(req: ChatRequest):
         explicit_saves = _extract_saves(full_text)
         clean_text = _strip_saves(full_text) if explicit_saves else full_text
 
-        for slug, fact in explicit_saves:
-            if slug in set(all_topics) | ({new_topic} if new_topic else set()):
-                from .memory import get_topic, save_topic
-                row = get_topic(slug)
-                existing = row["content"] if row else ""
-                save_topic(slug, f"{existing}\n- {fact}".strip())
-
-        save_message(session_id, "assistant", clean_text)
-
-        if update_topics:
-            yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
         memory_cost = 0.0
-        try:
-            updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
-        except Exception:
-            import traceback; traceback.print_exc()
-            updated = []
+        updated: list[str] = []
+        assistant_msg_id = None
+        if is_continue:
+            # Merge the continuation into the existing stopped message.
+            from .memory import get_messages, edit_message
+            prior = next((m["content"] for m in get_messages(session_id)
+                          if m["id"] == req.continue_message_id), "")
+            sep = "" if (prior.endswith(" ") or clean_text.startswith(" ")) else " "
+            merged = (prior + sep + clean_text).strip()
+            edit_message(session_id, req.continue_message_id, merged)
+            assistant_msg_id = req.continue_message_id
+        elif not req.private:
+            for slug, fact in explicit_saves:
+                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
+                    from .memory import get_topic, save_topic
+                    row = get_topic(slug)
+                    existing = row["content"] if row else ""
+                    save_topic(slug, f"{existing}\n- {fact}".strip())
 
-        updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            assistant_msg_id = save_message(session_id, "assistant", clean_text)
 
-        try:
-            _maybe_summarize(session_id)
-        except Exception:
-            pass
+            if update_topics:
+                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
+            try:
+                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
+            except Exception:
+                import traceback; traceback.print_exc()
 
-        # Geocode addresses concurrently (Nominatim rate-limits to 1 req/s, but parallel is fine for small batches)
-        locations: list[dict] = []
-        try:
-            import concurrent.futures
-            addrs = _detect_addresses(clean_text)
-            if addrs:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-                    futures = {ex.submit(_geocode, a): a for a in addrs}
-                    for f in concurrent.futures.as_completed(futures, timeout=8):
-                        loc = f.result()
-                        if loc:
-                            locations.append(loc)
-        except Exception:
-            pass
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+
+            try:
+                _maybe_summarize(session_id)
+            except Exception:
+                pass
+
+        # Extract explicit [[MAP:...]] markers the agent placed in its response
+        locations = _extract_maps(full_text)
+        clean_text = _strip_maps(clean_text)
 
         total_cost = round(chat_cost + memory_cost, 6)
-        yield f"data: {json.dumps({'type': 'done', 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}, 'locations': locations, 'search_sources': search_sources})}\n\n"
+        cost_bd = {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}
+        if assistant_msg_id is not None:
+            update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': search_sources})}\n\n"
+
+    def generate_gemini():
+        """Streaming generator for Gemini models."""
+        try:
+            from google import genai as google_genai
+            from google.genai import types as gtypes
+        except ImportError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'google-genai package not installed'})}\n\n"
+            return
+
+        import os
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'GOOGLE_API_KEY not configured'})}\n\n"
+            return
+
+        meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
+        if new_topic:
+            meta["new_topic"] = new_topic
+        if urls:
+            meta["fetched_urls"] = urls
+        yield f"data: {json.dumps(meta)}\n\n"
+
+        client_g = google_genai.Client(api_key=api_key)
+
+        # Convert messages to Gemini format
+        def _to_parts(content):
+            if isinstance(content, str):
+                return [gtypes.Part.from_text(text=content)]
+            parts = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                t = block.get("type")
+                if t == "text":
+                    parts.append(gtypes.Part.from_text(text=block["text"]))
+                elif t == "image":
+                    src = block.get("source", {})
+                    if src.get("type") == "base64":
+                        import base64
+                        parts.append(gtypes.Part.from_bytes(
+                            data=base64.b64decode(src["data"]),
+                            mime_type=src.get("media_type", "image/jpeg"),
+                        ))
+            return parts or [gtypes.Part.from_text(text="")]
+
+        gemini_msgs = []
+        for msg in messages_for_api:
+            role = "model" if msg["role"] == "assistant" else "user"
+            gemini_msgs.append(gtypes.Content(role=role, parts=_to_parts(msg["content"])))
+
+        if isinstance(system, list):
+            gemini_system = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
+        else:
+            gemini_system = system
+        config = gtypes.GenerateContentConfig(
+            system_instruction=gemini_system,
+            temperature=0.7,
+        )
+
+        full_text = ""
+        in_tokens = 0
+        out_tokens = 0
+        try:
+            for chunk in client_g.models.generate_content_stream(
+                model=_MODEL,
+                contents=gemini_msgs,
+                config=config,
+            ):
+                if chunk.text:
+                    full_text += chunk.text
+                    yield f"data: {json.dumps({'type': 'delta', 'text': chunk.text})}\n\n"
+                usage = getattr(chunk, "usage_metadata", None)
+                if usage:
+                    in_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                    out_tokens = getattr(usage, "candidates_token_count", 0) or 0
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+        chat_cost = _calc_cost(_MODEL, in_tokens, out_tokens)
+
+        explicit_saves = _extract_saves(full_text)
+        clean_text = _strip_saves(full_text) if explicit_saves else full_text
+        memory_cost = 0.0
+        updated: list[str] = []
+        assistant_msg_id = None
+        if not req.private:
+            for slug, fact in explicit_saves:
+                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
+                    from .memory import get_topic, save_topic
+                    row = get_topic(slug)
+                    existing = row["content"] if row else ""
+                    save_topic(slug, f"{existing}\n- {fact}".strip())
+            assistant_msg_id = save_message(session_id, "assistant", clean_text)
+            if update_topics:
+                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
+            try:
+                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
+            except Exception:
+                pass
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            try:
+                _maybe_summarize(session_id)
+            except Exception:
+                pass
+
+        locations = _extract_maps(full_text)
+        clean_text = _strip_maps(clean_text)
+        total_cost = round(chat_cost + memory_cost, 6)
+        cost_bd = {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}
+        if assistant_msg_id is not None:
+            update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
+
+    def generate_moa():
+        """MoA: 3 Gemini Flash agents in parallel → Claude Sonnet synthesizer."""
+        import os, concurrent.futures
+
+        try:
+            from google import genai as google_genai
+            from google.genai import types as gtypes
+        except ImportError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'google-genai not installed'})}\n\n"
+            return
+
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'GOOGLE_API_KEY not configured'})}\n\n"
+            return
+
+        meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
+        if new_topic: meta["new_topic"] = new_topic
+        if urls: meta["fetched_urls"] = urls
+        yield f"data: {json.dumps(meta)}\n\n"
+        yield f"data: {json.dumps({'type': 'moa_brainstorm'})}\n\n"
+
+        # Convert Anthropic message format → Gemini
+        def _to_parts(content):
+            if isinstance(content, str):
+                return [gtypes.Part.from_text(text=content)]
+            parts = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    parts.append(gtypes.Part.from_text(text=block["text"]))
+                elif block.get("type") == "image":
+                    src = block.get("source", {})
+                    if src.get("type") == "base64":
+                        import base64 as _b64
+                        parts.append(gtypes.Part.from_bytes(
+                            data=_b64.b64decode(src["data"]),
+                            mime_type=src.get("media_type", "image/jpeg"),
+                        ))
+            return parts or [gtypes.Part.from_text(text="")]
+
+        gemini_msgs = [
+            gtypes.Content(
+                role="model" if m["role"] == "assistant" else "user",
+                parts=_to_parts(m["content"]),
+            )
+            for m in messages_for_api
+        ]
+
+        # Flatten Anthropic list[dict] system → plain string for Gemini
+        if isinstance(system, list):
+            system_str = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
+        else:
+            system_str = system
+
+        AGENTS = [
+            ("Comprehensive", "Explore all aspects thoroughly: background, context, nuance, and implications."),
+            ("Concise",       "Cut to the core. Read what was said above, then give the 2-3 most important points directly. Agree, disagree, or add what was missed."),
+            ("Critical",      "Challenge assumptions. Read what was said above, then identify edge cases, counterarguments, risks, and what could go wrong."),
+        ]
+
+        drafts: list[tuple[str, str]] = []
+        flash_cost = 0.0
+
+        for agent_idx, (persona, instruction) in enumerate(AGENTS):
+            # Build debate context: show all previous agents' responses
+            if drafts:
+                prior = "\n\n".join(
+                    f"[{p} — Agent {i+1}]\n{t}"
+                    for i, (p, t) in enumerate(drafts)
+                )
+                agent_system = (
+                    system_str
+                    + f"\n\nYou are Agent {agent_idx + 1} of 3 in a multi-agent discussion. "
+                    f"The agents before you have already responded:\n\n{prior}\n\n"
+                    f"Your role ({persona}): {instruction}"
+                )
+            else:
+                agent_system = (
+                    system_str
+                    + f"\n\nYou are Agent 1 of 3 in a multi-agent discussion. "
+                    f"Your role ({persona}): {instruction}"
+                )
+
+            client_g = google_genai.Client(api_key=api_key)
+            cfg = gtypes.GenerateContentConfig(
+                system_instruction=agent_system,
+                temperature=0.8,
+            )
+            full = ""
+            in_tok = out_tok = 0
+            try:
+                for chunk in client_g.models.generate_content_stream(
+                    model="gemini-3.5-flash", contents=gemini_msgs, config=cfg,
+                ):
+                    if chunk.text:
+                        full += chunk.text
+                        yield f"data: {json.dumps({'type': 'moa_draft_delta', 'moa_persona': persona, 'moa_text': chunk.text})}\n\n"
+                    u = getattr(chunk, "usage_metadata", None)
+                    if u:
+                        in_tok = getattr(u, "prompt_token_count", 0) or 0
+                        out_tok = getattr(u, "candidates_token_count", 0) or 0
+            except Exception as e:
+                full = f"[Error: {e}]"
+            flash_cost += _calc_cost("gemini-3.5-flash", in_tok, out_tok)
+            drafts.append((persona, full))
+            yield f"data: {json.dumps({'type': 'moa_agent_done', 'moa_persona': persona})}\n\n"
+
+        valid = [(p, t) for p, t in drafts if t and not t.startswith("[Error")]
+        if not valid:
+            errors = "; ".join(t for _, t in drafts)
+            yield f"data: {json.dumps({'type': 'error', 'message': f'All agents failed: {errors}'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'moa_synthesizing'})}\n\n"
+
+        draft_block = "\n\n".join(f"<agent name=\"{p}\" index=\"{i+1}\">\n{t}\n</agent>" for i, (p, t) in enumerate(drafts))
+        synthesis_msg = (
+            f"Three agents had a sequential debate about the user's query — each agent read the previous agents' responses before writing their own. "
+            f"Now synthesize the best possible unified response: take the strongest insights, incorporate critiques, and resolve any disagreements into a clear, well-structured answer.\n\n"
+            f"<user_query>{req.message}</user_query>\n\n"
+            f"<debate>\n{draft_block}\n</debate>"
+        )
+
+        full_text = ""
+        chat_cost = 0.0
+        try:
+            with _client.messages.stream(
+                model="claude-sonnet-5",
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": synthesis_msg}],
+            ) as stream:
+                for event in stream:
+                    if getattr(event, "type", None) == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta and getattr(delta, "type", None) == "text_delta":
+                            full_text += delta.text
+                            yield f"data: {json.dumps({'type': 'delta', 'text': delta.text})}\n\n"
+                try:
+                    final = stream.get_final_message()
+                    chat_cost = _calc_cost("claude-sonnet-5", final.usage.input_tokens, final.usage.output_tokens)
+                except Exception:
+                    pass
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+
+        explicit_saves = _extract_saves(full_text)
+        clean_text = _strip_saves(full_text) if explicit_saves else full_text
+        memory_cost = 0.0
+        updated: list[str] = []
+        assistant_msg_id = None
+        if not req.private:
+            for slug, fact in explicit_saves:
+                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
+                    from .memory import get_topic, save_topic
+                    row = get_topic(slug)
+                    existing = row["content"] if row else ""
+                    save_topic(slug, f"{existing}\n- {fact}".strip())
+            drafts_for_db = [{"persona": p, "text": t, "done": True} for p, t in drafts if not t.startswith("[Error")]
+            assistant_msg_id = save_message(session_id, "assistant", clean_text, moa_drafts=drafts_for_db or None)
+            if update_topics:
+                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
+            try:
+                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
+            except Exception:
+                pass
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            try:
+                _maybe_summarize(session_id)
+            except Exception:
+                pass
+
+        locations = _extract_maps(full_text)
+        clean_text = _strip_maps(clean_text)
+        total_cost = round(flash_cost + chat_cost + memory_cost, 6)
+        import logging as _log
+        _log.getLogger(__name__).info("MoA cost: flash=%.6f chat=%.6f memory=%.6f total=%.6f", flash_cost, chat_cost, memory_cost, total_cost)
+        cost_bd = {'chat': round(flash_cost + chat_cost, 6), 'memory': round(memory_cost, 6)}
+        if assistant_msg_id is not None:
+            update_message_meta(assistant_msg_id, 'moa', total_cost, cost_bd)
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': [], 'search_sources': []})}\n\n"
+
+    if is_continue:
+        # Continuation always uses the standard Claude generator (it holds the merge logic).
+        generator = generate()
+    elif req.multi_agent:
+        generator = generate_moa()
+    elif _MODEL.startswith("gemini"):
+        generator = generate_gemini()
+    else:
+        generator = generate()
 
     return StreamingResponse(
-        generate(),
+        generator,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -737,7 +1119,7 @@ def session_messages(session_id: str):
     if not get_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     msgs = get_messages(session_id)
-    return {"messages": [{"id": m["id"], "role": m["role"], "content": m["content"]} for m in msgs]}
+    return {"messages": [{"id": m["id"], "role": m["role"], "content": m["content"], "moa_drafts": m.get("moa_drafts"), "model": m.get("model"), "cost_usd": m.get("cost_usd"), "cost_breakdown": m.get("cost_breakdown")} for m in msgs]}
 
 
 @app.patch("/sessions/{session_id}/messages/{msg_id}")
@@ -757,11 +1139,68 @@ def message_delete(session_id: str, msg_id: int):
     return {"ok": True}
 
 
+@app.post("/sessions/{session_id}/messages")
+def append_message(session_id: str, body: dict):
+    """Append a message (used to persist a partial assistant reply after the
+    user hits Stop, since the streaming generator never reached its save)."""
+    role = body.get("role", "assistant")
+    content = (body.get("content") or "").strip()
+    if role not in ("assistant", "user") or not content:
+        raise HTTPException(status_code=400, detail="role and content required")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    msg_id = save_message(session_id, role, content)
+    return {"ok": True, "id": msg_id}
+
+
+@app.patch("/sessions/{session_id}")
+def session_rename(session_id: str, body: dict):
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title required")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    update_session_title(session_id, title[:120])
+    return {"ok": True}
+
+
 @app.delete("/sessions/{session_id}")
 def session_delete(session_id: str):
     if not delete_session_db(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True}
+
+
+@app.post("/feedback")
+def feedback(body: dict):
+    """Capture 👍/👎 on an assistant reply. Down-votes and notes are written to
+    the `feedback` memory topic so future answers can learn; bare up-votes are
+    acknowledged but not persisted (keeps the signal high)."""
+    rating = body.get("rating")
+    if rating not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
+    note = (body.get("note") or "").strip()
+    excerpt = (body.get("message") or "").strip().replace("\n", " ")[:100]
+
+    if rating == "up" and not note:
+        return {"ok": True, "stored": False}
+
+    from .memory import get_topic, save_topic, save_topic_embedding
+    from .embeddings import embed_bytes
+
+    existing = (get_topic("feedback") or {}).get("content", "")
+    icon = "👍" if rating == "up" else "👎"
+    date = _dt.date.today().isoformat()
+    entry = f"- [{date}] {icon} " + (note if note else "unhelpful response")
+    if excerpt:
+        entry += f' (re: "{excerpt}")'
+    new_content = f"{existing}\n{entry}".strip()
+    save_topic("feedback", new_content, description="User feedback on assistant replies")
+    try:
+        save_topic_embedding("feedback", embed_bytes(f"feedback {new_content}"))
+    except Exception:
+        pass
+    return {"ok": True, "stored": True}
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +1336,37 @@ def task_delete(task_id: str):
     remove_task_from_scheduler(task_id)
     if not delete_task(task_id):
         raise HTTPException(status_code=404, detail="Task not found")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Push notifications
+# ---------------------------------------------------------------------------
+
+@app.get("/push/vapid-public-key")
+def push_vapid_public_key():
+    from .push import VAPID_PUBLIC_KEY
+    return {"public_key": VAPID_PUBLIC_KEY}
+
+
+class PushSubscribeBody(BaseModel):
+    endpoint: str
+    keys: dict  # {p256dh, auth}
+
+@app.post("/push/subscribe")
+def push_subscribe(body: PushSubscribeBody):
+    from .memory import save_push_subscription
+    save_push_subscription(
+        endpoint=body.endpoint,
+        p256dh=body.keys.get("p256dh", ""),
+        auth=body.keys.get("auth", ""),
+    )
+    return {"ok": True}
+
+@app.delete("/push/subscribe")
+def push_unsubscribe(body: PushSubscribeBody):
+    from .memory import delete_push_subscription
+    delete_push_subscription(body.endpoint)
     return {"ok": True}
 
 

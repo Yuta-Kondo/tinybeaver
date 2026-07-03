@@ -6,9 +6,12 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import os
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+
+_TZ = os.getenv("SCHEDULER_TZ", "America/Toronto")
 
 _scheduler: BackgroundScheduler | None = None
 
@@ -23,22 +26,45 @@ _WEEKDAY_MAP = {
 }
 
 
+_TIME_LABELS = {
+    "08:00": "Morning (8:00 AM)",
+    "12:00": "Lunch (12:00 PM)",
+    "18:00": "Evening (6:00 PM)",
+    "22:00": "Before sleep (10:00 PM)",
+}
+
 def parse_schedule(schedule: str) -> str:
-    """Parse schedule string into human-readable description."""
-    parts = schedule.strip().split()
-    if parts[0] == "daily" and len(parts) >= 2:
-        return f"Every day at {parts[1]}"
-    if parts[0] == "weekly" and len(parts) >= 3:
-        return f"Every {parts[1].capitalize()} at {parts[2]}"
-    if parts[0] == "once" and len(parts) >= 2:
-        return f"Once at {parts[1]}"
-    return schedule
+    """Parse schedule string (possibly comma-separated) into human-readable description."""
+    entries = [s.strip() for s in schedule.split(",") if s.strip()]
+    labels = []
+    for entry in entries:
+        parts = entry.split()
+        if parts[0] == "daily" and len(parts) >= 2:
+            labels.append(_TIME_LABELS.get(parts[1], parts[1]))
+        elif parts[0] == "weekly" and len(parts) >= 3:
+            labels.append(f"Every {parts[1].capitalize()} {_TIME_LABELS.get(parts[2], parts[2])}")
+        elif parts[0] == "once" and len(parts) >= 2:
+            labels.append(f"Once at {parts[1]}")
+        else:
+            labels.append(entry)
+    return " · ".join(labels) if labels else schedule
 
 
 def next_run_from_schedule(schedule: str) -> str | None:
-    """Compute next run datetime (UTC ISO) from schedule string."""
+    """Compute earliest next run datetime (UTC ISO) from schedule string (comma-separated)."""
+    import zoneinfo
+    tz = zoneinfo.ZoneInfo(_TZ)
+    now = datetime.now(tz)
+    candidates = []
+    for entry in schedule.split(","):
+        result = _next_run_single(entry.strip(), now)
+        if result:
+            candidates.append(result)
+    return min(candidates) if candidates else None
+
+
+def _next_run_single(schedule: str, now: datetime) -> str | None:
     parts = schedule.strip().split()
-    now = datetime.now(timezone.utc)
 
     try:
         if parts[0] == "daily" and len(parts) >= 2:
@@ -75,14 +101,14 @@ def _build_trigger(schedule: str):
     try:
         if parts[0] == "daily" and len(parts) >= 2:
             h, m = map(int, parts[1].split(":"))
-            return CronTrigger(hour=h, minute=m, timezone="UTC")
+            return CronTrigger(hour=h, minute=m, timezone=_TZ)
         if parts[0] == "weekly" and len(parts) >= 3:
             day = _WEEKDAY_MAP.get(parts[1].upper(), "mon")
             h, m = map(int, parts[2].split(":"))
-            return CronTrigger(day_of_week=day, hour=h, minute=m, timezone="UTC")
+            return CronTrigger(day_of_week=day, hour=h, minute=m, timezone=_TZ)
         if parts[0] == "once" and len(parts) >= 2:
             dt = datetime.fromisoformat(parts[1]).replace(tzinfo=timezone.utc)
-            return DateTrigger(run_date=dt, timezone="UTC")
+            return DateTrigger(run_date=dt, timezone=_TZ)
     except Exception:
         pass
     return None
@@ -121,6 +147,14 @@ def _run_task(task_id: str, prompt: str, title: str) -> None:
     text = resp.content[0].text.strip()
     save_message(session_id, "assistant", text)
 
+    # Push notification
+    try:
+        from .push import send_push_to_all
+        preview = text[:120] + ("…" if len(text) > 120 else "")
+        send_push_to_all(title=f"[Task] {title}", body=preview, url=f"/?session={session_id}")
+    except Exception:
+        pass
+
     # Update next_run for recurring tasks
     task = get_task(task_id)
     if task:
@@ -152,21 +186,23 @@ def start_scheduler() -> None:
 
 def _schedule_task(task_id: str, prompt: str, title: str, schedule: str) -> None:
     sched = get_scheduler()
-    job_id = f"task_{task_id}"
-    # Remove existing job if any
-    if sched.get_job(job_id):
-        sched.remove_job(job_id)
+    # Remove all existing jobs for this task
+    for job in sched.get_jobs():
+        if job.id.startswith(f"task_{task_id}_"):
+            sched.remove_job(job.id)
 
-    trigger = _build_trigger(schedule)
-    if trigger:
-        sched.add_job(
-            _run_task,
-            trigger=trigger,
-            id=job_id,
-            args=[task_id, prompt, title],
-            replace_existing=True,
-            misfire_grace_time=300,
-        )
+    entries = [s.strip() for s in schedule.split(",") if s.strip()]
+    for i, entry in enumerate(entries):
+        trigger = _build_trigger(entry)
+        if trigger:
+            sched.add_job(
+                _run_task,
+                trigger=trigger,
+                id=f"task_{task_id}_{i}",
+                args=[task_id, prompt, title],
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
 
 
 def add_task_to_scheduler(task_id: str, prompt: str, title: str, schedule: str) -> None:
@@ -177,6 +213,6 @@ def add_task_to_scheduler(task_id: str, prompt: str, title: str, schedule: str) 
 
 def remove_task_from_scheduler(task_id: str) -> None:
     sched = get_scheduler()
-    job_id = f"task_{task_id}"
-    if sched.get_job(job_id):
-        sched.remove_job(job_id)
+    for job in sched.get_jobs():
+        if job.id.startswith(f"task_{task_id}_"):
+            sched.remove_job(job.id)
