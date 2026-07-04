@@ -14,6 +14,7 @@ ALLOWED_MODELS = {
     "claude-sonnet-5",
     "claude-opus-4-8",
     "gemini-3.5-flash",
+    "glm-5.2",
 }
 
 DEFAULT_MODEL = "claude-sonnet-5"

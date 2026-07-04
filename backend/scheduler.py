@@ -33,6 +33,18 @@ _TIME_LABELS = {
     "22:00": "Before sleep (10:00 PM)",
 }
 
+def _validate_time(time_str: str) -> bool:
+    """Check if a time string is valid (HH:MM format with 00-23 hours, 00-59 minutes)."""
+    try:
+        parts = time_str.split(":")
+        if len(parts) != 2:
+            return False
+        h, m = int(parts[0]), int(parts[1])
+        return 0 <= h <= 23 and 0 <= m <= 59
+    except (ValueError, IndexError):
+        return False
+
+
 def parse_schedule(schedule: str) -> str:
     """Parse schedule string (possibly comma-separated) into human-readable description."""
     entries = [s.strip() for s in schedule.split(",") if s.strip()]
@@ -40,9 +52,21 @@ def parse_schedule(schedule: str) -> str:
     for entry in entries:
         parts = entry.split()
         if parts[0] == "daily" and len(parts) >= 2:
-            labels.append(_TIME_LABELS.get(parts[1], parts[1]))
+            time_str = parts[1]
+            if _validate_time(time_str):
+                labels.append(_TIME_LABELS.get(time_str, time_str))
+            else:
+                labels.append(f"[Invalid: {time_str}]")
         elif parts[0] == "weekly" and len(parts) >= 3:
-            labels.append(f"Every {parts[1].capitalize()} {_TIME_LABELS.get(parts[2], parts[2])}")
+            day = parts[1].upper()
+            time_str = parts[2]
+            day_ok = day in _WEEKDAY_MAP
+            time_ok = _validate_time(time_str)
+            if day_ok and time_ok:
+                labels.append(f"Every {day.capitalize()} {_TIME_LABELS.get(time_str, time_str)}")
+            else:
+                issues = [msg for ok, msg in ((day_ok, f"day: {day}"), (time_ok, f"time: {time_str}")) if not ok]
+                labels.append(f"[Invalid weekly ({', '.join(issues)})]")
         elif parts[0] == "once" and len(parts) >= 2:
             labels.append(f"Once at {parts[1]}")
         else:
@@ -68,6 +92,8 @@ def _next_run_single(schedule: str, now: datetime) -> str | None:
 
     try:
         if parts[0] == "daily" and len(parts) >= 2:
+            if not _validate_time(parts[1]):
+                return None
             h, m = map(int, parts[1].split(":"))
             candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
             if candidate <= now:
@@ -75,7 +101,10 @@ def _next_run_single(schedule: str, now: datetime) -> str | None:
             return candidate.isoformat()
 
         if parts[0] == "weekly" and len(parts) >= 3:
-            day = _WEEKDAY_MAP.get(parts[1].upper(), "mon")
+            day = parts[1].upper()
+            if day not in _WEEKDAY_MAP or not _validate_time(parts[2]):
+                return None
+            day = _WEEKDAY_MAP.get(day, "mon")
             h, m = map(int, parts[2].split(":"))
             # Find next occurrence of that weekday
             day_nums = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -100,10 +129,15 @@ def _build_trigger(schedule: str):
     parts = schedule.strip().split()
     try:
         if parts[0] == "daily" and len(parts) >= 2:
+            if not _validate_time(parts[1]):
+                return None
             h, m = map(int, parts[1].split(":"))
             return CronTrigger(hour=h, minute=m, timezone=_TZ)
         if parts[0] == "weekly" and len(parts) >= 3:
-            day = _WEEKDAY_MAP.get(parts[1].upper(), "mon")
+            day = parts[1].upper()
+            if day not in _WEEKDAY_MAP or not _validate_time(parts[2]):
+                return None
+            day = _WEEKDAY_MAP.get(day, "mon")
             h, m = map(int, parts[2].split(":"))
             return CronTrigger(day_of_week=day, hour=h, minute=m, timezone=_TZ)
         if parts[0] == "once" and len(parts) >= 2:

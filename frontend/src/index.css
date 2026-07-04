@@ -1444,6 +1444,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .model-dropdown-dot--anthropic { background: #cc785c; }
 .model-dropdown-dot--gemini    { background: #4285F4; }
+.model-dropdown-dot--glm       { background: #7C3AED; }
 
 .model-dropdown-name  { font-weight: 500; }
 .model-dropdown-version {

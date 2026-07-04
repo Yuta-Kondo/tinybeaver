@@ -11,6 +11,7 @@ const PALETTE_MODELS = [
   { id: "claude-sonnet-5", name: "Sonnet 5" },
   { id: "claude-opus-4-8", name: "Opus 4.8" },
   { id: "gemini-3.5-flash", name: "Flash 3.5" },
+  { id: "glm-5.2", name: "GLM 5.2" },
 ];
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -55,7 +56,7 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const VALID_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8", "gemini-3.5-flash"];
+  const VALID_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8", "gemini-3.5-flash", "glm-5.2"];
   const [model, setModel] = useState(() => {
     const stored = localStorage.getItem("selectedModel") ?? "";
     return VALID_MODELS.includes(stored) ? stored : "claude-sonnet-5";

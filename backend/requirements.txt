@@ -13,3 +13,4 @@ google-auth-httplib2>=0.4
 pywebpush>=2.0
 google-genai>=1.0
 pypdf>=4.0
+litellm>=1.60

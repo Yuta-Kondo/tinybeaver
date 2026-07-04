@@ -20,6 +20,7 @@ const MODELS = [
   { id: "claude-sonnet-5",           name: "Sonnet", version: "5",   provider: "anthropic", desc: "Recommended" },
   { id: "claude-opus-4-8",           name: "Opus",   version: "4.8", provider: "anthropic", desc: "Most capable" },
   { id: "gemini-3.5-flash",          name: "Flash",  version: "3.5", provider: "gemini",    desc: "Google · Fast" },
+  { id: "glm-5.2",                   name: "GLM",    version: "5.2", provider: "glm",       desc: "Zhipu · Open weight" },
 ];
 
 function ModelDropdown({ model, onModelChange, disabled }: { model: string; onModelChange: (m: string) => void; disabled: boolean }) {

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -50,7 +51,26 @@ from .memory import (
 )
 from .models import ChatRequest, SessionInfo
 
-app = FastAPI(title="Personal AI Agent")
+
+# ---------------------------------------------------------------------------
+# Lifespan: init DB + scheduler on startup
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: touch DB to run migrations
+    available_topics()
+    # Start task scheduler
+    try:
+        from .scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        print(f"Scheduler startup warning: {e}")
+    yield
+    # Shutdown: scheduler cleanup happens automatically
+
+
+app = FastAPI(title="Personal AI Agent", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -69,6 +89,7 @@ _PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6":         (3.00, 15.00),
     "claude-opus-4-8":           (5.00, 25.00),
     "gemini-3.5-flash":          (1.50,  9.00),
+    "glm-5.2":                   (0.50,  2.00),  # GLM pricing (adjust as needed)
 }
 # Sonnet 5 introductory pricing until Aug 31 2026, standard after
 _SONNET5_INTRO = (2.00, 10.00)
@@ -81,6 +102,9 @@ def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         p_in, p_out = _SONNET5_INTRO if _dt.date.today() <= _SONNET5_INTRO_END else _SONNET5_STANDARD
     else:
         p_in, p_out = _PRICING.get(model, (3.00, 15.00))
+    # Guard against negative token counts (shouldn't happen but defensive)
+    input_tokens = max(0, input_tokens)
+    output_tokens = max(0, output_tokens)
     return round((input_tokens * p_in + output_tokens * p_out) / 1_000_000, 6)
 
 
@@ -104,21 +128,6 @@ venue, address), add a map marker on its own line:
 Only use this for concrete, visitable places — not general areas or hypothetical addresses.
 
 """
-
-# ---------------------------------------------------------------------------
-# Startup: init DB + scheduler
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def startup():
-    # Touch DB to run migrations
-    available_topics()
-    # Start task scheduler
-    try:
-        from .scheduler import start_scheduler
-        start_scheduler()
-    except Exception as e:
-        print(f"Scheduler startup warning: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +535,7 @@ def chat_stream(req: ChatRequest):
         messages_for_api = api_messages + [{"role": "user", "content": user_content}]
     from .models import ALLOWED_MODELS, DEFAULT_MODEL
     _MODEL = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
-    if is_continue and _MODEL.startswith("gemini"):
+    if is_continue and (_MODEL.startswith("gemini") or _MODEL.startswith("glm")):
         _MODEL = DEFAULT_MODEL  # continuation runs on Claude
 
     # Gmail client-side tools (only added when Gmail is connected)
@@ -820,6 +829,114 @@ def chat_stream(req: ChatRequest):
             update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
         yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
 
+    def generate_glm():
+        """Streaming generator for GLM models, via LiteLLM's Z.ai provider."""
+        try:
+            import litellm
+        except ImportError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'litellm package not installed'})}\n\n"
+            return
+
+        api_key = os.getenv("ZAI_API_KEY", "")
+        if not api_key:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'ZAI_API_KEY not configured'})}\n\n"
+            return
+
+        meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
+        if new_topic:
+            meta["new_topic"] = new_topic
+        if urls:
+            meta["fetched_urls"] = urls
+        yield f"data: {json.dumps(meta)}\n\n"
+
+        # Convert messages to OpenAI-style format expected by LiteLLM
+        glm_msgs = []
+        for msg in messages_for_api:
+            role = msg["role"] if msg["role"] in ("user", "assistant") else "user"
+            content = msg["content"]
+            if isinstance(content, str):
+                glm_msgs.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                # Handle multimodal content (images + text)
+                glm_content = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            glm_content.append({"type": "text", "text": block.get("text", "")})
+                        elif block.get("type") == "image":
+                            src = block.get("source", {})
+                            if src.get("type") == "base64" and src.get("data"):
+                                glm_content.append({"type": "image_url", "image_url": {"url": f"data:{src.get('media_type', 'image/jpeg')};base64,{src['data']}"}})
+                glm_msgs.append({"role": role, "content": glm_content})
+
+        # Convert system (list or str) to plain string, prepend as a system message
+        if isinstance(system, list):
+            system_str = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
+        else:
+            system_str = system
+        if system_str:
+            glm_msgs.insert(0, {"role": "system", "content": system_str})
+
+        full_text = ""
+        in_tokens = 0
+        out_tokens = 0
+        try:
+            response = litellm.completion(
+                model="zai/glm-5.2",
+                messages=glm_msgs,
+                api_key=api_key,
+                stream=True,
+                stream_options={"include_usage": True},
+                temperature=0.7,
+            )
+            for chunk in response:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        text = delta.content
+                        full_text += text
+                        yield f"data: {json.dumps({'type': 'delta', 'text': text})}\n\n"
+                if getattr(chunk, 'usage', None):
+                    in_tokens = getattr(chunk.usage, 'prompt_tokens', 0) or 0
+                    out_tokens = getattr(chunk.usage, 'completion_tokens', 0) or 0
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+        chat_cost = _calc_cost(_MODEL, in_tokens, out_tokens)
+
+        explicit_saves = _extract_saves(full_text)
+        clean_text = _strip_saves(full_text) if explicit_saves else full_text
+        memory_cost = 0.0
+        updated: list[str] = []
+        assistant_msg_id = None
+        if not req.private:
+            for slug, fact in explicit_saves:
+                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
+                    from .memory import get_topic, save_topic
+                    row = get_topic(slug)
+                    existing = row["content"] if row else ""
+                    save_topic(slug, f"{existing}\n- {fact}".strip())
+            assistant_msg_id = save_message(session_id, "assistant", clean_text)
+            if update_topics:
+                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
+            try:
+                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
+            except Exception:
+                pass
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            try:
+                _maybe_summarize(session_id)
+            except Exception:
+                pass
+
+        locations = _extract_maps(full_text)
+        clean_text = _strip_maps(clean_text)
+        total_cost = round(chat_cost + memory_cost, 6)
+        cost_bd = {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}
+        if assistant_msg_id is not None:
+            update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
+
     def generate_moa():
         """MoA: 3 Gemini Flash agents in parallel → Claude Sonnet synthesizer."""
         import os, concurrent.futures
@@ -1012,6 +1129,8 @@ def chat_stream(req: ChatRequest):
         generator = generate_moa()
     elif _MODEL.startswith("gemini"):
         generator = generate_gemini()
+    elif _MODEL.startswith("glm"):
+        generator = generate_glm()
     else:
         generator = generate()
 

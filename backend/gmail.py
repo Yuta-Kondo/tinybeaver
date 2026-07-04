@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import base64
-import email as email_lib
 import json
 import os
+import re
 from typing import Any
 
+from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -147,9 +148,17 @@ def _extract_body(payload: dict) -> str:
         if not data:
             return ""
         raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-        # Strip HTML tags for plain text
-        msg = email_lib.message_from_string(raw)
-        return msg.get_payload(decode=True).decode("utf-8", errors="replace") if msg.get_payload() else raw
+        # Strip HTML tags for plain text using BeautifulSoup
+        try:
+            soup = BeautifulSoup(raw, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            return re.sub(r'\n{3,}', '\n\n', text)
+        except Exception:
+            # Fallback if parsing fails on malformed HTML
+            text = re.sub(r'<[^>]+>', ' ', raw)
+            return re.sub(r'\s+', ' ', text).strip()
 
     # multipart — recurse into parts, prefer plain over html
     parts = payload.get("parts", [])
