@@ -1,3 +1,5 @@
+import { DEFAULT_MODEL } from "./models";
+
 export interface SessionInfo {
   session_id: string;
   title: string;
@@ -324,7 +326,7 @@ export function streamChat(
   onEvent: (e: StreamEvent) => void,
   images: string[] = [],
   files: AttachedFile[] = [],
-  model = "claude-sonnet-4-6",
+  model = DEFAULT_MODEL,
   multiAgent = false,
   privateMode = false,
   history: { role: string; content: string }[] = [],

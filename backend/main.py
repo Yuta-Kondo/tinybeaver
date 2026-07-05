@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-import anthropic
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -21,8 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .classifier import classify
 from . import gmail as gmail_module
+from .classifier import classify
+from .llm import anthropic_client, finalize_stream, llm_json, sse, strip_code_fence
 from .memory import (
     available_topics,
     create_topic,
@@ -49,7 +49,24 @@ from .memory import (
     update_session_title,
     update_task_next_run,
 )
-from .models import ChatRequest, SessionInfo
+from .models import (
+    ALLOWED_MODELS,
+    DEFAULT_MODEL,
+    MODELS,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
+    PROVIDER_GLM,
+    UTILITY_MODEL,
+    calc_cost,
+    ChatRequest,
+    SessionInfo,
+)
+from .providers import (
+    convert_gemini_messages,
+    flatten_system,
+    stream_gemini,
+    stream_glm,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,34 +95,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_client = anthropic.Anthropic()
-
-# Pricing per million tokens  (input, output)  — June 2026
+# Shared Anthropic client + cost calculation live in backend.llm / backend.models.
 # Contact email used in outbound request headers and push VAPID claims.
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@example.com")
 
-_PRICING: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5-20251001": (1.00,  5.00),
-    "claude-sonnet-4-6":         (3.00, 15.00),
-    "claude-opus-4-8":           (5.00, 25.00),
-    "gemini-3.5-flash":          (1.50,  9.00),
-    "glm-5.2":                   (0.50,  2.00),  # GLM pricing (adjust as needed)
-}
-# Sonnet 5 introductory pricing until Aug 31 2026, standard after
-_SONNET5_INTRO = (2.00, 10.00)
-_SONNET5_STANDARD = (3.00, 15.00)
-_SONNET5_INTRO_END = _dt.date(2026, 8, 31)
-
-
-def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    if model == "claude-sonnet-5":
-        p_in, p_out = _SONNET5_INTRO if _dt.date.today() <= _SONNET5_INTRO_END else _SONNET5_STANDARD
-    else:
-        p_in, p_out = _PRICING.get(model, (3.00, 15.00))
-    # Guard against negative token counts (shouldn't happen but defensive)
-    input_tokens = max(0, input_tokens)
-    output_tokens = max(0, output_tokens)
-    return round((input_tokens * p_in + output_tokens * p_out) / 1_000_000, 6)
+# Thin alias so the existing generator code reads naturally.
+_client = anthropic_client()
+_calc_cost = calc_cost
 
 
 _STATIC_SYSTEM = """\
@@ -285,22 +281,8 @@ Return ONLY a JSON object: {{"topic_slug": "updated content", ...}}
 Omit topics with no changes. If nothing changed, return {{}}.
 Memory files are concise personal summaries, not transcripts. Do not invent facts."""
 
-    _model = "claude-haiku-4-5-20251001"
-    resp = _client.messages.create(
-        model=_model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    cost = _calc_cost(_model, resp.usage.input_tokens, resp.usage.output_tokens)
-
-    text = resp.content[0].text.strip()
-    if text.startswith("```"):
-        text = "\n".join(text.split("\n")[1:])
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.rsplit("```", 1)[0]
-
-    updates: dict = json.loads(text.strip())
+    text, cost = llm_json(prompt, model=UTILITY_MODEL, max_tokens=4096)
+    updates: dict = json.loads(strip_code_fence(text))
     allowed = set(topics)
     updated: list[str] = []
     for slug, content in updates.items():
@@ -328,7 +310,7 @@ def _summarize_messages(msgs: list[dict], existing_summary: str) -> str:
         f"{conversation}"
     )
     resp = _client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=UTILITY_MODEL,
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -716,226 +698,108 @@ def chat_stream(req: ChatRequest):
             update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
         yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': search_sources})}\n\n"
 
-    def generate_gemini():
-        """Streaming generator for Gemini models."""
-        try:
-            from google import genai as google_genai
-            from google.genai import types as gtypes
-        except ImportError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'google-genai package not installed'})}\n\n"
-            return
-
-        import os
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'GOOGLE_API_KEY not configured'})}\n\n"
-            return
-
+    def _emit_start():
         meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
         if new_topic:
             meta["new_topic"] = new_topic
         if urls:
             meta["fetched_urls"] = urls
-        yield f"data: {json.dumps(meta)}\n\n"
+        return sse(meta)
 
-        client_g = google_genai.Client(api_key=api_key)
+    def _merge_continue(sid: str, continue_msg_id: int | None, clean_text: str) -> int | None:
+        """Merge a continuation into an existing stopped message; return its id."""
+        from .memory import get_messages, edit_message
+        prior = next((m["content"] for m in get_messages(sid)
+                      if m["id"] == continue_msg_id), "")
+        sep = "" if (prior.endswith(" ") or clean_text.startswith(" ")) else " "
+        merged = (prior + sep + clean_text).strip()
+        edit_message(sid, continue_msg_id, merged)
+        return continue_msg_id
 
-        # Convert messages to Gemini format
-        def _to_parts(content):
-            if isinstance(content, str):
-                return [gtypes.Part.from_text(text=content)]
-            parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                t = block.get("type")
-                if t == "text":
-                    parts.append(gtypes.Part.from_text(text=block["text"]))
-                elif t == "image":
-                    src = block.get("source", {})
-                    if src.get("type") == "base64":
-                        import base64
-                        parts.append(gtypes.Part.from_bytes(
-                            data=base64.b64decode(src["data"]),
-                            mime_type=src.get("media_type", "image/jpeg"),
-                        ))
-            return parts or [gtypes.Part.from_text(text="")]
+    def _save_explicit(explicit_saves, all_topics, new_topic):
+        """Persist inline [[SAVE:slug:fact]] markers the model emitted."""
+        valid = set(all_topics) | ({new_topic} if new_topic else set())
+        for slug, fact in explicit_saves:
+            if slug in valid:
+                from .memory import get_topic, save_topic
+                row = get_topic(slug)
+                existing = row["content"] if row else ""
+                save_topic(slug, f"{existing}\n- {fact}".strip())
 
-        gemini_msgs = []
-        for msg in messages_for_api:
-            role = "model" if msg["role"] == "assistant" else "user"
-            gemini_msgs.append(gtypes.Content(role=role, parts=_to_parts(msg["content"])))
-
-        if isinstance(system, list):
-            gemini_system = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
-        else:
-            gemini_system = system
-        config = gtypes.GenerateContentConfig(
-            system_instruction=gemini_system,
-            temperature=0.7,
-        )
-
+    def generate_gemini():
+        """Streaming generator for Gemini models."""
         full_text = ""
         in_tokens = 0
         out_tokens = 0
+        yield _emit_start()
         try:
-            for chunk in client_g.models.generate_content_stream(
-                model=_MODEL,
-                contents=gemini_msgs,
-                config=config,
+            for text, tin, tout in stream_gemini(
+                model=_MODEL, messages_for_api=messages_for_api, system=system,
             ):
-                if chunk.text:
-                    full_text += chunk.text
-                    yield f"data: {json.dumps({'type': 'delta', 'text': chunk.text})}\n\n"
-                usage = getattr(chunk, "usage_metadata", None)
-                if usage:
-                    in_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                    out_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                if text:
+                    full_text += text
+                    yield sse({"type": "delta", "text": text})
+                in_tokens, out_tokens = tin or in_tokens, tout or out_tokens
+        except ImportError:
+            yield sse({"type": "error", "message": "google-genai package not installed"})
+            return
+        except RuntimeError as e:
+            yield sse({"type": "error", "message": str(e)})
+            return
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield sse({"type": "error", "message": str(e)})
             return
         chat_cost = _calc_cost(_MODEL, in_tokens, out_tokens)
-
-        explicit_saves = _extract_saves(full_text)
-        clean_text = _strip_saves(full_text) if explicit_saves else full_text
-        memory_cost = 0.0
-        updated: list[str] = []
-        assistant_msg_id = None
-        if not req.private:
-            for slug, fact in explicit_saves:
-                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
-                    from .memory import get_topic, save_topic
-                    row = get_topic(slug)
-                    existing = row["content"] if row else ""
-                    save_topic(slug, f"{existing}\n- {fact}".strip())
-            assistant_msg_id = save_message(session_id, "assistant", clean_text)
-            if update_topics:
-                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
-            try:
-                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
-            except Exception:
-                pass
-            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
-            try:
-                _maybe_summarize(session_id)
-            except Exception:
-                pass
-
-        locations = _extract_maps(full_text)
-        clean_text = _strip_maps(clean_text)
-        total_cost = round(chat_cost + memory_cost, 6)
-        cost_bd = {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}
-        if assistant_msg_id is not None:
-            update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
-        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
+        yield from finalize_stream(
+            full_text=full_text, chat_cost=chat_cost,
+            is_continue=is_continue, is_private=req.private,
+            session_id=session_id, continue_message_id=req.continue_message_id,
+            user_message=req.message, all_topics=all_topics, new_topic=new_topic,
+            update_topics=update_topics, model_label=_MODEL,
+            extract_saves=_extract_saves, strip_saves=_strip_saves,
+            extract_maps=_extract_maps, strip_maps=_strip_maps,
+            update_memory=_update_memory, maybe_summarize=_maybe_summarize,
+            save_assistant=lambda sid, text: save_message(sid, "assistant", text),
+            merge_continue=_merge_continue, save_explicit=_save_explicit,
+        )
 
     def generate_glm():
         """Streaming generator for GLM models, via LiteLLM's Z.ai provider."""
-        try:
-            import litellm
-        except ImportError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'litellm package not installed'})}\n\n"
-            return
-
-        api_key = os.getenv("ZAI_API_KEY", "")
-        if not api_key:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'ZAI_API_KEY not configured'})}\n\n"
-            return
-
-        meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
-        if new_topic:
-            meta["new_topic"] = new_topic
-        if urls:
-            meta["fetched_urls"] = urls
-        yield f"data: {json.dumps(meta)}\n\n"
-
-        # Convert messages to OpenAI-style format expected by LiteLLM
-        glm_msgs = []
-        for msg in messages_for_api:
-            role = msg["role"] if msg["role"] in ("user", "assistant") else "user"
-            content = msg["content"]
-            if isinstance(content, str):
-                glm_msgs.append({"role": role, "content": content})
-            elif isinstance(content, list):
-                # Handle multimodal content (images + text)
-                glm_content = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            glm_content.append({"type": "text", "text": block.get("text", "")})
-                        elif block.get("type") == "image":
-                            src = block.get("source", {})
-                            if src.get("type") == "base64" and src.get("data"):
-                                glm_content.append({"type": "image_url", "image_url": {"url": f"data:{src.get('media_type', 'image/jpeg')};base64,{src['data']}"}})
-                glm_msgs.append({"role": role, "content": glm_content})
-
-        # Convert system (list or str) to plain string, prepend as a system message
-        if isinstance(system, list):
-            system_str = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
-        else:
-            system_str = system
-        if system_str:
-            glm_msgs.insert(0, {"role": "system", "content": system_str})
-
         full_text = ""
         in_tokens = 0
         out_tokens = 0
+        yield _emit_start()
         try:
-            response = litellm.completion(
+            for text, tin, tout in stream_glm(
                 model="zai/glm-5.2",
-                messages=glm_msgs,
-                api_key=api_key,
-                stream=True,
-                stream_options={"include_usage": True},
-                temperature=0.7,
-            )
-            for chunk in response:
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        text = delta.content
-                        full_text += text
-                        yield f"data: {json.dumps({'type': 'delta', 'text': text})}\n\n"
-                if getattr(chunk, 'usage', None):
-                    in_tokens = getattr(chunk.usage, 'prompt_tokens', 0) or 0
-                    out_tokens = getattr(chunk.usage, 'completion_tokens', 0) or 0
+                messages_for_api=messages_for_api, system=system,
+            ):
+                if text:
+                    full_text += text
+                    yield sse({"type": "delta", "text": text})
+                in_tokens, out_tokens = tin or in_tokens, tout or out_tokens
+        except ImportError:
+            yield sse({"type": "error", "message": "litellm package not installed"})
+            return
+        except RuntimeError as e:
+            yield sse({"type": "error", "message": str(e)})
+            return
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield sse({"type": "error", "message": str(e)})
             return
         chat_cost = _calc_cost(_MODEL, in_tokens, out_tokens)
-
-        explicit_saves = _extract_saves(full_text)
-        clean_text = _strip_saves(full_text) if explicit_saves else full_text
-        memory_cost = 0.0
-        updated: list[str] = []
-        assistant_msg_id = None
-        if not req.private:
-            for slug, fact in explicit_saves:
-                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
-                    from .memory import get_topic, save_topic
-                    row = get_topic(slug)
-                    existing = row["content"] if row else ""
-                    save_topic(slug, f"{existing}\n- {fact}".strip())
-            assistant_msg_id = save_message(session_id, "assistant", clean_text)
-            if update_topics:
-                yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
-            try:
-                updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
-            except Exception:
-                pass
-            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
-            try:
-                _maybe_summarize(session_id)
-            except Exception:
-                pass
-
-        locations = _extract_maps(full_text)
-        clean_text = _strip_maps(clean_text)
-        total_cost = round(chat_cost + memory_cost, 6)
-        cost_bd = {'chat': round(chat_cost, 6), 'memory': round(memory_cost, 6)}
-        if assistant_msg_id is not None:
-            update_message_meta(assistant_msg_id, _MODEL, total_cost, cost_bd)
-        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': _MODEL, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
+        yield from finalize_stream(
+            full_text=full_text, chat_cost=chat_cost,
+            is_continue=is_continue, is_private=req.private,
+            session_id=session_id, continue_message_id=req.continue_message_id,
+            user_message=req.message, all_topics=all_topics, new_topic=new_topic,
+            update_topics=update_topics, model_label=_MODEL,
+            extract_saves=_extract_saves, strip_saves=_strip_saves,
+            extract_maps=_extract_maps, strip_maps=_strip_maps,
+            update_memory=_update_memory, maybe_summarize=_maybe_summarize,
+            save_assistant=lambda sid, t: save_message(sid, "assistant", t),
+            merge_continue=_merge_continue, save_explicit=_save_explicit,
+        )
 
     def generate_moa():
         """MoA: 3 Gemini Flash agents in parallel → Claude Sonnet synthesizer."""
@@ -1149,7 +1013,7 @@ def _llm_clean_pdf(raw: str, filename: str) -> tuple[str, float]:
     """Returns (cleaned_text, cost_usd)."""
     if len(raw) < 200:
         return raw, 0.0
-    _model = "claude-haiku-4-5-20251001"
+    _model = UTILITY_MODEL
     resp = _client.messages.create(
         model=_model,
         max_tokens=8192,
@@ -1521,19 +1385,8 @@ Tasks:
 Return ONLY a JSON object: {{"slug": "revised content", ...}}
 Only include topics that need changes. If all looks good, return {{}}."""
 
-    resp = _client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=8096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = resp.content[0].text.strip()
-    if text.startswith("```"):
-        text = "\n".join(text.split("\n")[1:])
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.rsplit("```", 1)[0]
-
-    updates: dict = json.loads(text.strip())
+    text, _cost = llm_json(prompt, model=UTILITY_MODEL, max_tokens=8096)
+    updates: dict = json.loads(strip_code_fence(text))
     updated: list[str] = []
     from .memory import save_topic
     for slug, content in updates.items():

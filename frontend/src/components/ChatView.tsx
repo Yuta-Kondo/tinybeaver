@@ -5,6 +5,7 @@ import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
 import { deleteMessage, extractFile } from "../lib/api";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
+import { MODELS, findModel } from "../lib/models";
 
 interface PendingFile extends AttachedFile {
   key: string;
@@ -14,19 +15,10 @@ interface PendingFile extends AttachedFile {
   thumb?: string;  // first-page preview for PDFs
 }
 
-const MODELS = [
-  { id: "claude-haiku-4-5-20251001", name: "Haiku",  version: "4.5", provider: "anthropic", desc: "Fast & efficient" },
-  { id: "claude-sonnet-4-6",         name: "Sonnet", version: "4.6", provider: "anthropic", desc: "Balanced" },
-  { id: "claude-sonnet-5",           name: "Sonnet", version: "5",   provider: "anthropic", desc: "Recommended" },
-  { id: "claude-opus-4-8",           name: "Opus",   version: "4.8", provider: "anthropic", desc: "Most capable" },
-  { id: "gemini-3.5-flash",          name: "Flash",  version: "3.5", provider: "gemini",    desc: "Google · Fast" },
-  { id: "glm-5.2",                   name: "GLM",    version: "5.2", provider: "glm",       desc: "Zhipu · Open weight" },
-];
-
 function ModelDropdown({ model, onModelChange, disabled }: { model: string; onModelChange: (m: string) => void; disabled: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const active = MODELS.find((m) => m.id === model) ?? MODELS[1];
+  const active = findModel(model);
 
   const close = useCallback(() => setOpen(false), []);
   useEffect(() => {

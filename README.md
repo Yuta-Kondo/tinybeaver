@@ -16,7 +16,7 @@ learning about you over time.
 - **Topic memory.** Messages are classified into topics; relevant topics are
   loaded into context and updated after each reply. Browse/edit them in the
   Memory panel; semantic search over topics via embeddings.
-- **Model picker** — Claude Haiku / Sonnet / Opus and Gemini Flash, per chat.
+- **Model picker** — Claude Haiku / Sonnet / Opus, Gemini Flash, and GLM, per chat.
 - **Multi-agent (MoA) mode** — a sequential debate of three Gemini agents
   synthesized by Claude, streamed live per agent.
 - **Private mode** — nothing is written to the DB or memory for that conversation.
@@ -35,6 +35,9 @@ learning about you over time.
 ```
 backend/            FastAPI app
 ├── main.py         routes, chat streaming, tools (search, gmail, files)
+├── llm.py          shared Anthropic client + streaming/JSON helpers
+├── providers.py    Gemini / GLM providers (message conversion + streaming)
+├── models.py       single-source model registry, pricing, cost calc, pydantic models
 ├── memory.py       SQLite: sessions, messages, topics (+ migrations)
 ├── classifier.py   routes a message to relevant/new topics
 ├── embeddings.py   topic embeddings for semantic search
@@ -43,11 +46,16 @@ backend/            FastAPI app
 └── scheduler.py    background scheduled tasks
 
 frontend/           React + TypeScript (Vite)
-└── src/            components, hooks (useChat), lib/api
+└── src/            components, hooks (useChat), lib/api, lib/models
 
 docker-compose.yml  backend (uvicorn) + nginx (serves SPA, proxies API routes)
 nginx.conf          static + SSE proxy config
 ```
+
+Models, pricing, and cost tags are defined once in `backend/models.py`
+(`MODELS` registry) and mirrored in `frontend/src/lib/models.ts`. To add a
+model, add one entry to each; the dropdown, command palette, validation,
+labels, and cost calculations all read from those registries.
 
 Data lives in SQLite at `data/memory.db` (git-ignored). Auth in production is
 handled at the edge by Cloudflare Access.
@@ -86,6 +94,8 @@ npm run dev                   # http://localhost:5173, proxies API routes to :80
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REDIRECT_URI` | Gmail integration |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | web-push notifications |
 | `CONTACT_EMAIL` | contact used in request headers + VAPID claims |
+| `JINA_API_KEY` | optional — improves URL fetching in chat (r.jina.ai) |
+| `SCHEDULER_TZ` | optional — IANA timezone for scheduled tasks (e.g. `America/Toronto`) |
 
 ---
 

@@ -4,15 +4,10 @@ import ChatView, { type ChatViewHandle } from "./components/ChatView";
 import CommandPalette, { type Command } from "./components/CommandPalette";
 import { useChat } from "./hooks/useChat";
 import { deleteSession, fetchSessions, type SessionInfo } from "./lib/api";
+import { MODELS, resolveModel } from "./lib/models";
 
-const PALETTE_MODELS = [
-  { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5" },
-  { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
-  { id: "claude-sonnet-5", name: "Sonnet 5" },
-  { id: "claude-opus-4-8", name: "Opus 4.8" },
-  { id: "gemini-3.5-flash", name: "Flash 3.5" },
-  { id: "glm-5.2", name: "GLM 5.2" },
-];
+/** Model entries formatted for the command palette: "Sonnet 5", "Haiku 4.5", … */
+const PALETTE_MODELS = MODELS.map((m) => ({ id: m.id, name: `${m.name} ${m.version}` }));
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -56,10 +51,9 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const VALID_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8", "gemini-3.5-flash", "glm-5.2"];
   const [model, setModel] = useState(() => {
     const stored = localStorage.getItem("selectedModel") ?? "";
-    return VALID_MODELS.includes(stored) ? stored : "claude-sonnet-5";
+    return resolveModel(stored);
   });
   const [multiAgent, setMultiAgent] = useState(() => localStorage.getItem("multiAgent") === "1");
   const [privateMode, setPrivateMode] = useState(false);

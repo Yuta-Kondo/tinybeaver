@@ -2,18 +2,9 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
+from .llm import anthropic_client, strip_code_fence
 from .memory import topic_descriptions
-
-_client: anthropic.Anthropic | None = None
-
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
+from .models import UTILITY_MODEL
 
 
 def _topic_list_with_descriptions() -> tuple[list[str], str]:
@@ -51,8 +42,8 @@ def classify(message: str) -> tuple[list[str], str | None]:
     if not topics:
         return [], None
     try:
-        resp = _get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
+        resp = anthropic_client().messages.create(
+            model=UTILITY_MODEL,
             max_tokens=100,
             messages=[{
                 "role": "user",
@@ -62,10 +53,8 @@ def classify(message: str) -> tuple[list[str], str | None]:
                 ),
             }],
         )
-        text = resp.content[0].text.strip()
-        if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:]).rsplit("```", 1)[0]
-        data = json.loads(text.strip())
+        text = strip_code_fence(resp.content[0].text)
+        data = json.loads(text)
         relevant = [t for t in data.get("relevant", []) if t in topics]
         new_topic: str | None = data.get("new_topic") or None
         return relevant, new_topic

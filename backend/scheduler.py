@@ -150,7 +150,8 @@ def _build_trigger(schedule: str):
 
 def _run_task(task_id: str, prompt: str, title: str) -> None:
     """Called by scheduler. Runs the agent prompt, saves to a new session."""
-    import anthropic
+    from .llm import anthropic_client
+    from .models import UTILITY_MODEL
     from .memory import (
         available_topics, get_api_messages, load_context, save_message,
         save_session, update_session_title, update_task_next_run, get_task,
@@ -171,9 +172,9 @@ def _run_task(task_id: str, prompt: str, title: str) -> None:
         + (f"\n## Memory\n\n{context}" if context else "")
     )
 
-    client = anthropic.Anthropic()
+    client = anthropic_client()
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=UTILITY_MODEL,
         max_tokens=1024,
         system=system,
         messages=[{"role": "user", "content": prompt}],

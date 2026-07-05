@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import type { Message } from "../hooks/useChat";
 import hljs from "highlight.js/lib/common";
 import { fetchTopic, sendFeedback } from "../lib/api";
+import { modelLabel } from "../lib/models";
 import Icon from "./Icon";
 import MapCard from "./MapCard";
 
@@ -185,16 +186,6 @@ function TopicTag({ slug, variant }: { slug: string; variant: "loaded" | "update
       )}
     </span>
   );
-}
-
-function modelLabel(id: string): string {
-  if (id === "moa") return "Multi";
-  if (id.includes("opus")) return "Opus";
-  if (id.includes("sonnet")) return "Sonnet";
-  if (id.includes("haiku")) return "Haiku";
-  if (id.includes("fable")) return "Fable";
-  if (id.includes("flash")) return "Flash";
-  return id;
 }
 
 function renderUserContent(content: string) {

@@ -17,6 +17,9 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# Vendored Node runtime used locally for builds (not part of the app)
+node-v*/
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

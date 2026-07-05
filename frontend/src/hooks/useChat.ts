@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { type AttachedFile, type GeoLocation, appendMessage, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
+import { DEFAULT_MODEL } from "../lib/models";
 
 export type MessageStatus = "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing";
 
@@ -69,7 +70,7 @@ export function useChat(sessionId: string | null) {
   };
 
   const _stream = useCallback(
-    (text: string, sid: string | null, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = "claude-sonnet-4-6", multiAgent = false, privateMode = false, history: { role: string; content: string }[] = [], continueMessageId: number | null = null) => {
+    (text: string, sid: string | null, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false, history: { role: string; content: string }[] = [], continueMessageId: number | null = null) => {
       currentPrivateRef.current = privateMode;
       const isContinue = continueMessageId != null;
       let resolvedSession = sid;
@@ -211,7 +212,7 @@ export function useChat(sessionId: string | null) {
   );
 
   const sendMessage = useCallback(
-    (text: string, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = "claude-sonnet-4-6", multiAgent = false, privateMode = false) => {
+    (text: string, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false) => {
       if (streaming) return;
       lastSendRef.current = { text, onNewSession, images, files, model, multiAgent, privateMode };
       setMessages((prev) => [...prev, { role: "user", content: text, images }]);
@@ -251,7 +252,7 @@ export function useChat(sessionId: string | null) {
     (msgId: number) => {
       if (streaming || !activeSessionRef.current) return;
       setStreaming(true);
-      _stream("", activeSessionRef.current, () => {}, [], [], "claude-sonnet-5", false, false, [], msgId);
+      _stream("", activeSessionRef.current, () => {}, [], [], DEFAULT_MODEL, false, false, [], msgId);
     },
     [streaming, _stream]
   );
