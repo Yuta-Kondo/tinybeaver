@@ -61,8 +61,20 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const chatViewRef = useRef<ChatViewHandle>(null);
   const sidebarOpenRef = useRef(false);
-  const { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession } =
+  const { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession, deleteMessageFromSession } =
     useChat(activeId);
+
+  // Open session from push notification deep link (?session=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sid = params.get("session");
+    if (!sid) return;
+    const clean = window.location.pathname;
+    window.history.replaceState({}, "", clean);
+    setActiveId(sid);
+    loadSession(sid);
+    fetchSessions().then(setSessions).catch(() => {});
+  }, [loadSession]);
 
   function handleModelChange(m: string) {
     setModel(m);
@@ -224,7 +236,7 @@ export default function App() {
   }
 
   function handleResend(msgId: number, newContent: string) {
-    resendFromMessage(msgId, newContent, handleNewSession);
+    resendFromMessage(msgId, newContent, handleNewSession, model, multiAgent, privateMode);
   }
 
   // Pre-fill the chat textarea with text (e.g. email content sent from GmailPanel)
@@ -257,6 +269,7 @@ export default function App() {
         onResend={handleResend}
         onRetry={retryLast}
         onContinue={continueMessage}
+        onDeleteMessage={deleteMessageFromSession}
         onMenuOpen={() => setSidebarOpen(true)}
         model={model}
         onModelChange={handleModelChange}

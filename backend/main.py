@@ -209,6 +209,65 @@ def _run_tavily_search(query: str) -> tuple[str, list[dict]]:
         return f"Search error: {e}", []
 
 
+_SEARCH_NEED_PROMPT = """\
+Does this user message need a live web search for current or recent information?
+Reply ONLY JSON: {{"needs_search": true/false, "query": "search query or empty"}}
+
+Needs search: news, prices, weather, recent events, current status, "latest", dates in 2025+.
+No search: personal questions about Yuta, coding help, timeless knowledge, opinions, memory topics.
+
+Message: {message}"""
+
+
+def _prefetch_web_search(message: str) -> tuple[str, list[dict], float]:
+    """Pre-run Tavily for non-Claude-tool paths. Returns (context_block, sources, cost_usd)."""
+    if not os.getenv("TAVILY_API_KEY"):
+        return "", [], 0.0
+    try:
+        text, cost = llm_json(
+            _SEARCH_NEED_PROMPT.format(message=message[:1500]),
+            model=UTILITY_MODEL,
+            max_tokens=80,
+        )
+        data = json.loads(strip_code_fence(text))
+        if not data.get("needs_search"):
+            return "", [], cost
+        query = (data.get("query") or message[:200]).strip()
+        if not query:
+            return "", [], cost
+        result_text, sources = _run_tavily_search(query)
+        block = f"[Web search results for: {query}]\n{result_text}\n[End of web search]"
+        return block, sources, cost
+    except Exception:
+        return "", [], 0.0
+
+
+def _reindex_topic_embedding(slug: str, content: str, description: str = "") -> None:
+    from .embeddings import embed_bytes
+    from .memory import save_topic_embedding
+
+    save_topic_embedding(slug, embed_bytes(f"{slug} {description} {content}".strip()))
+
+
+def _moa_agents_for_run() -> list:
+    """Return MoA agents, falling back Skeptic to Haiku when ZAI_API_KEY is missing."""
+    from .models import MoAAgentDef
+
+    active: list[MoAAgentDef] = []
+    for agent in MOA_AGENTS:
+        if agent.provider == PROVIDER_GLM and not os.getenv("ZAI_API_KEY"):
+            active.append(MoAAgentDef(
+                agent.persona,
+                UTILITY_MODEL,
+                PROVIDER_ANTHROPIC,
+                agent.temperature,
+                agent.instruction + " (GLM unavailable — you are the backup skeptic on Haiku.)",
+            ))
+        else:
+            active.append(agent)
+    return active
+
+
 def _parse_mentions(message: str, all_topics: list[str]) -> list[str]:
     valid = set(all_topics)
     return [m for m in _MENTION_RE.findall(message) if m in valid]
@@ -292,9 +351,7 @@ Memory files are concise personal summaries, not transcripts. Do not invent fact
             from .memory import save_topic
             save_topic(slug, content)
             try:
-                from .embeddings import embed_bytes
-                from .memory import save_topic_embedding
-                save_topic_embedding(slug, embed_bytes(f"{slug} {content}"))
+                _reindex_topic_embedding(slug, content)
             except Exception:
                 pass
             updated.append(slug)
@@ -464,15 +521,39 @@ def chat_stream(req: ChatRequest):
         api_messages, summary = get_api_messages(session_id)
         system = _build_system(context, summary)
 
-    # Fetch URLs in message
+    # Fetch URLs in message (parallel)
     urls = _extract_urls(req.message)
     url_context = ""
     if urls:
-        parts = []
-        for url in urls:
-            text = _fetch_url_text(url)
-            parts.append(f"**URL:** {url}\n{text}")
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(3, len(urls))) as pool:
+            parts = list(pool.map(
+                lambda u: f"**URL:** {u}\n{_fetch_url_text(u)}",
+                urls,
+            ))
         url_context = "\n\n---\n".join(parts)
+
+    from .models import ALLOWED_MODELS, DEFAULT_MODEL
+    _MODEL = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+    if is_continue and (_MODEL.startswith("gemini") or _MODEL.startswith("glm")):
+        _MODEL = DEFAULT_MODEL  # continuation runs on Claude
+
+    uses_native_tools = (
+        not req.multi_agent
+        and not _MODEL.startswith("gemini")
+        and not _MODEL.startswith("glm")
+    )
+    prefetch_block = ""
+    prefetch_sources: list[dict] = []
+    prefetch_cost = 0.0
+    if (
+        not uses_native_tools
+        and not req.private
+        and not is_continue
+        and os.getenv("TAVILY_API_KEY")
+    ):
+        prefetch_block, prefetch_sources, prefetch_cost = _prefetch_web_search(req.message)
 
     user_content: list[dict] = []
     for data_url in req.images:
@@ -486,6 +567,11 @@ def chat_stream(req: ChatRequest):
         user_content.append({
             "type": "text",
             "text": f"[Fetched URL content]\n{url_context}\n[End of fetched content]",
+        })
+    if prefetch_block:
+        user_content.append({
+            "type": "text",
+            "text": prefetch_block,
         })
     for f in req.files:
         user_content.append({
@@ -517,10 +603,6 @@ def chat_stream(req: ChatRequest):
         }]
     else:
         messages_for_api = api_messages + [{"role": "user", "content": user_content}]
-    from .models import ALLOWED_MODELS, DEFAULT_MODEL
-    _MODEL = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
-    if is_continue and (_MODEL.startswith("gemini") or _MODEL.startswith("glm")):
-        _MODEL = DEFAULT_MODEL  # continuation runs on Claude
 
     # Gmail client-side tools (only added when Gmail is connected)
     def _gmail_tools() -> list[dict]:
@@ -763,6 +845,8 @@ def chat_stream(req: ChatRequest):
             update_memory=_update_memory, maybe_summarize=_maybe_summarize,
             save_assistant=lambda sid, text: save_message(sid, "assistant", text),
             merge_continue=_merge_continue, save_explicit=_save_explicit,
+            extra_cost=prefetch_cost,
+            search_sources=prefetch_sources,
         )
 
     def generate_glm():
@@ -801,16 +885,18 @@ def chat_stream(req: ChatRequest):
             update_memory=_update_memory, maybe_summarize=_maybe_summarize,
             save_assistant=lambda sid, t: save_message(sid, "assistant", t),
             merge_continue=_merge_continue, save_explicit=_save_explicit,
+            extra_cost=prefetch_cost,
+            search_sources=prefetch_sources,
         )
 
     def generate_moa():
-        """MoA: Advocate (Flash) → Skeptic (GLM) → Minimalist (Haiku) → Sonnet synthesis."""
+        """MoA: Advocate (Flash) → Skeptic (GLM/Haiku) → Minimalist (Haiku) → Sonnet synthesis."""
         if not os.getenv("GOOGLE_API_KEY"):
             yield sse({"type": "error", "message": "GOOGLE_API_KEY not configured"})
             return
-        if not os.getenv("ZAI_API_KEY"):
-            yield sse({"type": "error", "message": "ZAI_API_KEY not configured (required for Skeptic agent)"})
-            return
+
+        moa_agents = _moa_agents_for_run()
+        n_agents = len(moa_agents)
 
         meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
         if new_topic:
@@ -818,14 +904,16 @@ def chat_stream(req: ChatRequest):
         if urls:
             meta["fetched_urls"] = urls
         yield sse(meta)
+        if prefetch_sources:
+            yield sse({"type": "searching"})
         yield sse({"type": "moa_brainstorm"})
 
         system_str = flatten_system(system)
 
         drafts: list[tuple[str, str, str]] = []
-        agents_cost = 0.0
+        agents_cost = prefetch_cost
 
-        for agent_idx, agent in enumerate(MOA_AGENTS):
+        for agent_idx, agent in enumerate(moa_agents):
             persona, model_id, provider, temperature, instruction = (
                 agent.persona,
                 agent.model,
@@ -841,14 +929,14 @@ def chat_stream(req: ChatRequest):
                 )
                 agent_system = (
                     f"{system_str}\n\n"
-                    f"You are Agent {agent_idx + 1} of 3 in a multi-agent discussion. "
+                    f"You are Agent {agent_idx + 1} of {n_agents} in a multi-agent discussion. "
                     f"The agents before you have already responded:\n\n{prior}\n\n"
                     f"Your role ({persona}): {instruction}"
                 )
             else:
                 agent_system = (
                     f"{system_str}\n\n"
-                    f"You are Agent 1 of 3 in a multi-agent discussion. "
+                    f"You are Agent 1 of {n_agents} in a multi-agent discussion. "
                     f"Your role ({persona}): {instruction}"
                 )
 
@@ -994,7 +1082,7 @@ def chat_stream(req: ChatRequest):
         cost_bd = {"chat": round(agents_cost + chat_cost, 6), "memory": round(memory_cost, 6)}
         if assistant_msg_id is not None:
             update_message_meta(assistant_msg_id, 'moa', total_cost, cost_bd)
-        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': [], 'search_sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': prefetch_sources})}\n\n"
 
     if is_continue:
         # Continuation always uses the standard Claude generator (it holds the merge logic).
@@ -1022,6 +1110,9 @@ def chat_stream(req: ChatRequest):
 def _llm_clean_pdf(raw: str, filename: str) -> tuple[str, float]:
     """Returns (cleaned_text, cost_usd)."""
     if len(raw) < 200:
+        return raw, 0.0
+    # Skip Haiku cleanup when extraction already looks well-structured.
+    if len(raw) < 8000 and raw.count("\n\n") >= max(2, len(raw) // 2000):
         return raw, 0.0
     _model = UTILITY_MODEL
     resp = _client.messages.create(
@@ -1242,6 +1333,15 @@ def topics_reindex():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/topics/{slug}")
+def topic_delete(slug: str):
+    from .memory import delete_topic, get_topic
+    if not get_topic(slug):
+        raise HTTPException(status_code=404, detail="Topic not found")
+    delete_topic(slug)
+    return {"ok": True}
+
+
 @app.get("/topics/{slug}")
 def topic_read(slug: str):
     from .memory import get_topic
@@ -1402,6 +1502,10 @@ Only include topics that need changes. If all looks good, return {{}}."""
     for slug, content in updates.items():
         if slug in topics:
             save_topic(slug, content)
+            try:
+                _reindex_topic_embedding(slug, content)
+            except Exception:
+                pass
             updated.append(slug)
     return {"ok": True, "updated": updated}
 
@@ -1433,7 +1537,8 @@ def gmail_auth_callback(code: str, state: str = ""):
     try:
         email = gmail_module.exchange_code(code, state)
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url=f"http://localhost:5173/?gmail=connected&email={email}")
+        frontend = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+        return RedirectResponse(url=f"{frontend}/?gmail=connected&email={email}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -91,6 +91,7 @@ def finalize_stream(
     merge_continue,
     save_explicit,
     extra_cost: float = 0.0,
+    search_sources: list | None = None,
 ) -> Generator[str, None, None]:
     """Run the shared post-stream pipeline and yield the ``done`` event.
 
@@ -144,7 +145,7 @@ def finalize_stream(
         from .memory import update_message_meta
         update_message_meta(assistant_msg_id, model_label, total_cost, cost_bd)
 
-    yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': model_label, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': []})}\n\n"
+    yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': model_label, 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': search_sources or []})}\n\n"
 
 
 def sse(event: dict) -> str:

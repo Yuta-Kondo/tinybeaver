@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { type AttachedFile, type GeoLocation, appendMessage, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
+import { type AttachedFile, type GeoLocation, appendMessage, deleteMessage, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
 import { DEFAULT_MODEL } from "../lib/models";
 
 export type MessageStatus = "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing";
@@ -286,26 +286,57 @@ export function useChat(sessionId: string | null) {
   const continueMessage = useCallback(
     (msgId: number) => {
       if (streaming || !activeSessionRef.current) return;
+      const last = lastSendRef.current;
       setStreaming(true);
-      _stream("", activeSessionRef.current, () => {}, [], [], DEFAULT_MODEL, false, false, [], msgId);
+      _stream(
+        "",
+        activeSessionRef.current,
+        () => {},
+        [],
+        [],
+        last?.model ?? DEFAULT_MODEL,
+        last?.multiAgent ?? false,
+        last?.privateMode ?? false,
+        [],
+        msgId,
+      );
     },
-    [streaming, _stream]
+    [streaming, _stream],
   );
 
   const resendFromMessage = useCallback(
-    async (msgId: number, newContent: string, onNewSession: (id: string) => void) => {
+    async (
+      msgId: number,
+      newContent: string,
+      onNewSession: (id: string) => void,
+      model = DEFAULT_MODEL,
+      multiAgent = false,
+      privateMode = false,
+    ) => {
       if (streaming || !activeSessionRef.current) return;
-      // Edit in DB and truncate subsequent messages
       await editMessage(activeSessionRef.current, msgId, newContent);
-      // Reload messages from DB to get the truncated state
       const history = await fetchSessionMessages(activeSessionRef.current);
-      setMessages(history.map((m) => ({ id: m.id, role: m.role, content: m.content })));
-      // Stream the new response
+      setMessages(history.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        moaDrafts: m.moa_drafts,
+        model: m.model ?? undefined,
+        costUsd: m.cost_usd ?? undefined,
+        costBreakdown: m.cost_breakdown ?? undefined,
+      })));
       setStreaming(true);
-      _stream(newContent, activeSessionRef.current, onNewSession);
+      _stream(newContent, activeSessionRef.current, onNewSession, [], [], model, multiAgent, privateMode);
     },
-    [streaming, _stream]
+    [streaming, _stream],
   );
+
+  const deleteMessageFromSession = useCallback(async (msgId: number) => {
+    const sid = activeSessionRef.current;
+    if (!sid) return;
+    await deleteMessage(sid, msgId);
+    setMessages((prev) => prev.filter((m) => m.id !== msgId));
+  }, []);
 
   const cancel = useCallback(() => {
     cancelRef.current?.();
@@ -358,5 +389,5 @@ export function useChat(sessionId: string | null) {
     }
   }, []);
 
-  return { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession };
+  return { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession, deleteMessageFromSession };
 }

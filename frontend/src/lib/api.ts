@@ -208,6 +208,18 @@ export async function semanticSearchTopics(q: string): Promise<SemanticResult[]>
   return data.results ?? [];
 }
 
+export async function deleteTopic(slug: string): Promise<void> {
+  const r = await fetch(`/topics/${encodeURIComponent(slug)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error("Failed to delete topic");
+}
+
+export async function reindexTopics(): Promise<number> {
+  const r = await fetch("/topics/reindex", { method: "POST" });
+  if (!r.ok) throw new Error("Reindex failed");
+  const data = await r.json();
+  return data.updated ?? 0;
+}
+
 export async function reflect(): Promise<string[]> {
   const r = await fetch("/reflect", { method: "POST" });
   if (!r.ok) throw new Error("Reflect failed");

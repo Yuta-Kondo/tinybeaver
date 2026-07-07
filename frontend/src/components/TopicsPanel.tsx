@@ -4,9 +4,11 @@ import {
   type TopicDetail,
   type TopicSummary,
   createTopic,
+  deleteTopic,
   fetchTopic,
   fetchTopics,
   reflect,
+  reindexTopics,
   saveTopic,
   searchTopics,
   semanticSearchTopics,
@@ -25,6 +27,8 @@ export default function TopicsPanel() {
   const [newSlug, setNewSlug] = useState("");
   const [creatingNew, setCreatingNew] = useState(false);
   const [error, setError] = useState("");
+  const [reindexing, setReindexing] = useState(false);
+  const [reindexMsg, setReindexMsg] = useState("");
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadTopics = useCallback(async () => {
@@ -106,6 +110,33 @@ export default function TopicsPanel() {
     }
   }
 
+  async function handleDelete() {
+    if (!selected) return;
+    if (!window.confirm(`Delete topic "${selected.slug}"? This cannot be undone.`)) return;
+    setError("");
+    try {
+      await deleteTopic(selected.slug);
+      setSelected(null);
+      await loadTopics();
+    } catch {
+      setError("Delete failed.");
+    }
+  }
+
+  async function handleReindex() {
+    setReindexing(true);
+    setReindexMsg("");
+    setError("");
+    try {
+      const count = await reindexTopics();
+      setReindexMsg(`Reindexed ${count} topic${count === 1 ? "" : "s"}.`);
+    } catch {
+      setError("Reindex failed.");
+    } finally {
+      setReindexing(false);
+    }
+  }
+
   async function handleCreate() {
     const slug = newSlug.trim().toLowerCase().replace(/\s+/g, "-");
     if (!slug) return;
@@ -183,6 +214,14 @@ export default function TopicsPanel() {
         )}
         <button
           className="topics-footer-btn reflect-btn"
+          onClick={handleReindex}
+          disabled={reindexing}
+          title="Rebuild semantic search embeddings for all topics"
+        >
+          {reindexing ? "Reindexing…" : "↻ Reindex"}
+        </button>
+        <button
+          className="topics-footer-btn reflect-btn"
           onClick={handleReflect}
           disabled={reflecting}
           title="Ask Haiku to consolidate and clean all topics"
@@ -190,6 +229,8 @@ export default function TopicsPanel() {
           {reflecting ? "Reflecting…" : "⟳ Reflect"}
         </button>
       </div>
+
+      {reindexMsg && <p className="reflect-msg">{reindexMsg}</p>}
 
       {reflectMsg && <p className="reflect-msg">{reflectMsg}</p>}
       {error && <p className="topics-error">{error}</p>}
@@ -227,6 +268,9 @@ export default function TopicsPanel() {
             </button>
             <button className="cancel-topic-btn" onClick={() => setEditContent(selected.content)}>
               Reset
+            </button>
+            <button className="cancel-topic-btn topic-delete-btn" onClick={handleDelete} type="button">
+              Delete
             </button>
           </div>
         </div>

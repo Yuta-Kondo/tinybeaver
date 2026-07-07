@@ -146,6 +146,11 @@ export default function GmailPanel({ onSendToChat }: Props) {
             <span>{selected.from}</span>
             <span>{formatDate(selected.date)}</span>
           </div>
+          {onSendToChat && (
+            <button className="gmail-send-chat-btn" type="button" onClick={sendToChat}>
+              Discuss in chat
+            </button>
+          )}
           <div className="gmail-detail-body">{selected.body || selected.snippet}</div>
         </div>
       ) : (

@@ -1297,6 +1297,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .scroll-bottom-btn:hover { background: var(--bg-user); }
 .scroll-bottom-btn:active { transform: translateX(-50%) scale(0.9); }
 
+.input-compose {
+  position: relative;
+}
+
 .input-wrap {
   display: flex;
   align-items: flex-end;
@@ -1573,6 +1577,93 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: min(360px, 45vw);
+}
+
+.mention-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: var(--surface);
+  border: 1px solid var(--gb2);
+  border-radius: var(--r-sm);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 20;
+}
+.mention-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--t1);
+  cursor: pointer;
+}
+.mention-option:hover { background: rgba(124,58,237,0.08); }
+
+.topic-delete-btn { color: #f87171; margin-left: auto; }
+
+.gmail-send-chat-btn {
+  margin: 8px 0 12px;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--gb2);
+  background: rgba(124,58,237,0.08);
+  color: #a78bfa;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.gmail-send-chat-btn:hover { background: rgba(124,58,237,0.14); }
+
+.task-schedule-type {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.task-schedule-type-btn {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--gb2);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font);
+  color: var(--t2);
+}
+.task-schedule-type-btn--active {
+  border-color: rgba(167,139,250,0.5);
+  background: rgba(124,58,237,0.12);
+  color: #a78bfa;
+}
+.task-weekday-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.task-weekday-btn {
+  padding: 4px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--gb2);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: var(--font);
+  color: var(--t2);
+}
+.task-weekday-btn--active {
+  border-color: rgba(167,139,250,0.5);
+  background: rgba(124,58,237,0.12);
+  color: #a78bfa;
 }
 
 /* ── Private mode ─────────────────────────────────── */

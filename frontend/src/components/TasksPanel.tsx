@@ -9,12 +9,27 @@ const TIMES = [
   { label: "Before sleep", time: "10:00 PM", emoji: "🌙", value: "daily 22:00" },
 ];
 
+const WEEKDAYS = [
+  { label: "Mon", value: "MON" },
+  { label: "Tue", value: "TUE" },
+  { label: "Wed", value: "WED" },
+  { label: "Thu", value: "THU" },
+  { label: "Fri", value: "FRI" },
+  { label: "Sat", value: "SAT" },
+  { label: "Sun", value: "SUN" },
+];
+
+type ScheduleType = "daily" | "weekly" | "once";
+
 export default function TasksPanel() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set(["daily 08:00"]));
+  const [scheduleType, setScheduleType] = useState<ScheduleType>("daily");
+  const [weekday, setWeekday] = useState("MON");
+  const [onceAt, setOnceAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -38,17 +53,39 @@ export default function TasksPanel() {
   }
 
   async function handleCreate() {
-    if (!title.trim() || !prompt.trim() || selected.size === 0) {
-      setError("Title, prompt, and at least one time required.");
+    if (!title.trim() || !prompt.trim()) {
+      setError("Title and prompt are required.");
       return;
     }
-    // Join selected schedules in order
-    const schedule = TIMES.filter((t) => selected.has(t.value)).map((t) => t.value).join(",");
+    let schedule = "";
+    if (scheduleType === "daily") {
+      if (selected.size === 0) {
+        setError("Pick at least one time.");
+        return;
+      }
+      schedule = TIMES.filter((t) => selected.has(t.value)).map((t) => t.value).join(",");
+    } else if (scheduleType === "weekly") {
+      const timeEntry = TIMES.find((t) => selected.has(t.value));
+      if (!timeEntry) {
+        setError("Pick a time for the weekly task.");
+        return;
+      }
+      const time = timeEntry.value.replace("daily ", "");
+      schedule = `weekly ${weekday} ${time}`;
+    } else {
+      if (!onceAt) {
+        setError("Pick a date and time for the one-shot task.");
+        return;
+      }
+      schedule = `once ${onceAt}`;
+    }
     setSaving(true); setError("");
     try {
       await createTask(title.trim(), prompt.trim(), schedule);
       setCreating(false); setTitle(""); setPrompt("");
       setSelected(new Set(["daily 08:00"]));
+      setScheduleType("daily");
+      setOnceAt("");
       await load();
     } catch (e: any) {
       setError(e.message ?? "Failed to create task");
@@ -97,6 +134,40 @@ export default function TasksPanel() {
             onChange={(e) => setPrompt(e.target.value)}
             rows={3}
           />
+          <div className="task-schedule-type">
+            {(["daily", "weekly", "once"] as ScheduleType[]).map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={`task-schedule-type-btn${scheduleType === t ? " task-schedule-type-btn--active" : ""}`}
+                onClick={() => setScheduleType(t)}
+              >
+                {t === "daily" ? "Daily" : t === "weekly" ? "Weekly" : "Once"}
+              </button>
+            ))}
+          </div>
+          {scheduleType === "weekly" && (
+            <div className="task-weekday-btns">
+              {WEEKDAYS.map((d) => (
+                <button
+                  key={d.value}
+                  type="button"
+                  className={`task-weekday-btn${weekday === d.value ? " task-weekday-btn--active" : ""}`}
+                  onClick={() => setWeekday(d.value)}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {scheduleType === "once" ? (
+            <input
+              type="datetime-local"
+              className="task-input"
+              value={onceAt}
+              onChange={(e) => setOnceAt(e.target.value)}
+            />
+          ) : (
           <div className="task-time-btns">
             {TIMES.map((t) => (
               <button
@@ -111,6 +182,7 @@ export default function TasksPanel() {
               </button>
             ))}
           </div>
+          )}
           {error && <p className="task-error">{error}</p>}
           <div className="task-form-actions">
             <button className="task-save-btn" onClick={handleCreate} disabled={saving}>

@@ -36,6 +36,22 @@ Example: {{"relevant": ["phd", "finance"], "new_topic": null}}
 """
 
 
+def _merge_semantic_hits(message: str, relevant: list[str], topics: list[str]) -> list[str]:
+    """Augment classifier results with embedding similarity hits."""
+    try:
+        from .embeddings import semantic_search
+
+        topics_set = set(topics)
+        merged = list(relevant)
+        for hit in semantic_search(message, limit=5):
+            slug = hit.get("slug")
+            if slug in topics_set and slug not in merged and hit.get("score", 0) >= 0.35:
+                merged.append(slug)
+        return merged
+    except Exception:
+        return relevant
+
+
 def classify(message: str) -> tuple[list[str], str | None]:
     """Return (relevant_existing_topics, new_topic_slug_or_None)."""
     topics, topic_section = _topic_list_with_descriptions()
@@ -56,7 +72,10 @@ def classify(message: str) -> tuple[list[str], str | None]:
         text = strip_code_fence(resp.content[0].text)
         data = json.loads(text)
         relevant = [t for t in data.get("relevant", []) if t in topics]
+        relevant = _merge_semantic_hits(message, relevant, topics)
         new_topic: str | None = data.get("new_topic") or None
         return relevant, new_topic
     except Exception:
+        if topics:
+            return _merge_semantic_hits(message, [], topics), None
         return [], None

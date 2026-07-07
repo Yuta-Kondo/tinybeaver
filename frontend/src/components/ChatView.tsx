@@ -3,7 +3,7 @@ import MessageBubble from "./MessageBubble";
 import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
-import { deleteMessage, extractFile } from "../lib/api";
+import { extractFile, fetchTopics } from "../lib/api";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 
@@ -81,6 +81,7 @@ interface Props {
   onResend: (msgId: number, newContent: string) => void;
   onRetry: () => void;
   onContinue: (msgId: number) => void;
+  onDeleteMessage: (msgId: number) => Promise<void>;
   onMenuOpen: () => void;
   model: string;
   onModelChange: (m: string) => void;
@@ -150,7 +151,7 @@ const SpeechRecognitionImpl: any =
     ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     : undefined;
 
-const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, loadingSession, sessionId, onSend, onCancel, onResend, onRetry, onContinue, onMenuOpen, model, onModelChange, multiAgent, onMultiAgentChange, privateMode, privateLocked, onPrivateModeChange }, ref) {
+const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, loadingSession, sessionId, onSend, onCancel, onResend, onRetry, onContinue, onDeleteMessage, onMenuOpen, model, onModelChange, multiAgent, onMultiAgentChange, privateMode, privateLocked, onPrivateModeChange }, ref) {
   const [draft, setDraft] = useState(() => {
     try { return localStorage.getItem(draftKey(sessionId)) ?? ""; } catch { return ""; }
   });
@@ -166,6 +167,15 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pinnedRef = useRef(true);
+  const [topicSlugs, setTopicSlugs] = useState<string[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState("");
+
+  useEffect(() => {
+    fetchTopics()
+      .then((topics) => setTopicSlugs(topics.map((t) => t.slug)))
+      .catch(() => {});
+  }, []);
 
   useImperativeHandle(ref, () => ({
     focusInput: () => textareaRef.current?.focus(),
@@ -316,11 +326,54 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   // ── Submit ─────────────────────────────────────────
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionOpen && e.key === "Escape") {
+      setMentionOpen(false);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
     }
   }
+
+  function updateMentionState(val: string, caret: number) {
+    const before = val.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at >= 0 && (at === 0 || /\s/.test(before[at - 1]))) {
+      const frag = before.slice(at + 1);
+      if (!frag.includes(" ") && !frag.includes("\n")) {
+        setMentionOpen(true);
+        setMentionFilter(frag.toLowerCase());
+        return;
+      }
+    }
+    setMentionOpen(false);
+    setMentionFilter("");
+  }
+
+  function insertMention(slug: string) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const val = draft;
+    const caret = el.selectionStart ?? val.length;
+    const before = val.slice(0, caret);
+    const after = val.slice(caret);
+    const at = before.lastIndexOf("@");
+    if (at < 0) return;
+    const next = `${before.slice(0, at)}@${slug} ${after}`;
+    setDraft(next);
+    setMentionOpen(false);
+    setMentionFilter("");
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = at + slug.length + 2;
+      el.setSelectionRange(pos, pos);
+    });
+  }
+
+  const mentionMatches = mentionOpen
+    ? topicSlugs.filter((s) => s.toLowerCase().includes(mentionFilter)).slice(0, 8)
+    : [];
 
   function submit() {
     const text = draft.trim();
@@ -338,7 +391,9 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   }
 
   function autoResize(e: React.ChangeEvent<HTMLTextAreaElement>) {
-    setDraft(e.target.value);
+    const val = e.target.value;
+    setDraft(val);
+    updateMentionState(val, e.target.selectionStart ?? val.length);
     const el = e.target;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
@@ -381,7 +436,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
   async function handleDeleteMsg(msgId: number) {
     if (!sessionId) return;
-    await deleteMessage(sessionId, msgId);
+    await onDeleteMessage(msgId);
   }
 
   const isLoading = pendingFiles.some((f) => f.loading);
@@ -446,7 +501,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             <path d="M10 2C7 2 4.5 4.5 4.5 8v1H3a1 1 0 00-1 1v7a1 1 0 001 1h14a1 1 0 001-1V10a1 1 0 00-1-1h-1.5V8C15.5 4.5 13 2 10 2zm0 2c2 0 3.5 1.5 3.5 4v1h-7V8C6.5 5.5 8 4 10 4z" fill="currentColor" opacity="0.7"/>
             <circle cx="10" cy="13.5" r="1.5" fill="currentColor" opacity="0.5"/>
           </svg>
-          Private · this conversation won't be saved to memory
+          Private · not saved to memory — refreshing the page will lose this chat
         </div>
       )}
 
@@ -541,6 +596,21 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           </div>
         )}
 
+        <div className="input-compose">
+          {mentionOpen && mentionMatches.length > 0 && (
+            <div className="mention-dropdown" role="listbox">
+              {mentionMatches.map((slug) => (
+                <button
+                  key={slug}
+                  type="button"
+                  className="mention-option"
+                  onMouseDown={(e) => { e.preventDefault(); insertMention(slug); }}
+                >
+                  @{slug}
+                </button>
+              ))}
+            </div>
+          )}
         <div className="input-wrap">
           <button
             className="attach-btn"
@@ -561,7 +631,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <textarea
             ref={textareaRef}
             rows={1}
-            placeholder="Message…"
+            placeholder="Message… (@topic to load memory)"
             value={draft}
             onChange={autoResize}
             onKeyDown={handleKeyDown}
@@ -569,6 +639,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             disabled={streaming}
             autoComplete="off"
             autoCorrect="off"
+            onClick={(e) => updateMentionState(draft, (e.target as HTMLTextAreaElement).selectionStart ?? draft.length)}
             onTouchStart={() => {
               const el = textareaRef.current;
               if (!el) return;
@@ -606,6 +677,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           ) : (
             <button className="send-btn" onClick={submit} disabled={!canSend} title="Send (Enter)"><Icon name="send" size={17} /></button>
           )}
+        </div>
         </div>
         <div className="model-selector-row">
           <div className="model-selector-left">

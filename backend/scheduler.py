@@ -182,6 +182,13 @@ def _run_task(task_id: str, prompt: str, title: str) -> None:
     text = resp.content[0].text.strip()
     save_message(session_id, "assistant", text)
 
+    if relevant_topics:
+        try:
+            from .main import _update_memory
+            _update_memory(relevant_topics, prompt, text, None)
+        except Exception:
+            pass
+
     # Push notification
     try:
         from .push import send_push_to_all
