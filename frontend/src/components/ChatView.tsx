@@ -155,7 +155,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   const [draft, setDraft] = useState(() => {
     try { return localStorage.getItem(draftKey(sessionId)) ?? ""; } catch { return ""; }
   });
-  const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -246,30 +245,30 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
-  // ── File handling ──────────────────────────────────
+  // ── File handling (all types → LLM extraction via /files/extract) ──
 
   async function processFile(file: File) {
     const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].includes(ext);
+    const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff"].includes(ext);
+
+    const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let thumb: string | undefined;
     if (isImage) {
       try {
-        const url = await resizeImage(file, 1920, 0.82);
-        if (url) setPendingImages((p) => [...p, url]);
-      } catch (e: any) {
-        alert(`Could not load image "${file.name}": ${e?.message ?? e}`);
+        thumb = await resizeImage(file, 1920, 0.82);
+      } catch {
+        /* preview optional */
       }
-      return;
     }
 
-    // Show chip in loading state immediately
-    const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const placeholder: PendingFile = { key, name: file.name, text: "", sizeKb: 0, loading: true };
+    const placeholder: PendingFile = { key, name: file.name, text: "", sizeKb: 0, loading: true, thumb };
     setPendingFiles((p) => [...p, placeholder]);
 
-    // For PDFs, render a first-page thumbnail in parallel with text extraction.
     if (ext === "pdf") {
-      renderPdfThumbnail(file).then((thumb) => {
-        if (thumb) setPendingFiles((p) => p.map((f) => (f.key === key ? { ...f, thumb } : f)));
+      renderPdfThumbnail(file).then((pdfThumb) => {
+        if (pdfThumb) {
+          setPendingFiles((p) => p.map((f) => (f.key === key ? { ...f, thumb: pdfThumb } : f)));
+        }
       });
     }
 
@@ -283,7 +282,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         )
       );
     } catch (e: any) {
-      // Remove placeholder and show error
       setPendingFiles((p) => p.filter((f) => f.key !== key));
       alert(`Could not read "${file.name}": ${e.message}`);
     }
@@ -314,12 +312,8 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     imageItems.forEach((item) => {
       const file = item.getAsFile();
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const url = ev.target?.result as string;
-        if (url) setPendingImages((prev) => [...prev, url]);
-      };
-      reader.readAsDataURL(file);
+      const named = new File([file], file.name || `pasted-image-${Date.now()}.png`, { type: file.type });
+      processFile(named);
     });
   }
 
@@ -378,15 +372,13 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   function submit() {
     const text = draft.trim();
     const hasFiles = pendingFiles.some((f) => !f.loading);
-    if ((!text && pendingImages.length === 0 && !hasFiles) || streaming) return;
-    const imgs = pendingImages;
+    if ((!text && !hasFiles) || streaming) return;
     const files = pendingFiles.filter((f) => !f.loading).map(({ name, text }) => ({ name, text }));
     setDraft("");
     try { localStorage.removeItem(draftKey(sessionId)); } catch { /* ignore */ }
-    setPendingImages([]);
     setPendingFiles([]);
     snapToBottom();
-    onSend(text, imgs, files);
+    onSend(text, [], files);
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
@@ -428,10 +420,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     rec.start();
   }
 
-  function removeImage(idx: number) {
-    setPendingImages((prev) => prev.filter((_, i) => i !== idx));
-  }
-
   // ── Message actions ────────────────────────────────
 
   async function handleDeleteMsg(msgId: number) {
@@ -440,7 +428,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   }
 
   const isLoading = pendingFiles.some((f) => f.loading);
-  const canSend = (draft.trim().length > 0 || pendingImages.length > 0 || pendingFiles.some((f) => !f.loading)) && !streaming && !isLoading;
+  const canSend = (draft.trim().length > 0 || pendingFiles.some((f) => !f.loading)) && !streaming && !isLoading;
 
   return (
     <div
@@ -558,18 +546,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
       )}
 
       <div className="input-bar">
-        {/* Image previews */}
-        {pendingImages.length > 0 && (
-          <div className="image-previews">
-            {pendingImages.map((src, i) => (
-              <div key={i} className="image-preview-wrap">
-                <img src={src} alt={`pasted ${i + 1}`} className="image-preview" />
-                <button className="image-remove" onClick={() => removeImage(i)} title="Remove"><Icon name="close" size={11} /></button>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* File chips */}
         {pendingFiles.length > 0 && (
           <div className="file-chips">
@@ -586,7 +562,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
                       {f.costUsd && f.costUsd > 0.00001 ? ` · ${f.costUsd < 0.01 ? `${(f.costUsd * 100).toFixed(2)}¢` : `$${f.costUsd.toFixed(4)}`}` : ""}
                     </span>
                   )}
-                  {f.loading && <span className="file-chip-size">Extracting…</span>}
+                  {f.loading && <span className="file-chip-size">Reading with Flash…</span>}
                 </div>
                 {!f.loading && (
                   <button className="file-chip-remove" onClick={() => removeFile(i)} title="Remove"><Icon name="close" size={11} /></button>
@@ -623,7 +599,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*,.pdf,.csv,.txt,.md,.json"
+            accept="image/*,.pdf,.csv,.txt,.md,.json,.xlsx,.xlsm,.tsv"
             multiple
             style={{ display: "none" }}
             onChange={handleFileInput}

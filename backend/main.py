@@ -1104,79 +1104,34 @@ def chat_stream(req: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
-# File extraction
+# File extraction (Gemini multimodal — see backend/file_extract.py)
 # ---------------------------------------------------------------------------
-
-def _llm_clean_pdf(raw: str, filename: str) -> tuple[str, float]:
-    """Returns (cleaned_text, cost_usd)."""
-    if len(raw) < 200:
-        return raw, 0.0
-    # Skip Haiku cleanup when extraction already looks well-structured.
-    if len(raw) < 8000 and raw.count("\n\n") >= max(2, len(raw) // 2000):
-        return raw, 0.0
-    _model = UTILITY_MODEL
-    resp = _client.messages.create(
-        model=_model,
-        max_tokens=8192,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"The following is raw text extracted from a PDF file called '{filename}'. "
-                "Clean it up: fix OCR artifacts, remove page headers/footers/page numbers, "
-                "reformat any tables as Markdown tables, preserve document structure with "
-                "proper headings, and make it readable. Return ONLY the cleaned text, no commentary.\n\n"
-                f"{raw[:15000]}"
-            ),
-        }],
-    )
-    cost = _calc_cost(_model, resp.usage.input_tokens, resp.usage.output_tokens)
-    return resp.content[0].text.strip(), cost
-
 
 @app.post("/files/extract")
 async def extract_file(file: UploadFile = File(...)):
+    from .file_extract import extract_file_bytes
+
     data = await file.read()
-    name = file.filename or ""
-    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    name = file.filename or "attachment"
+    size_kb = round(len(data) / 1024, 1)
 
     try:
-        if ext == "pdf":
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(data))
-            pages = [p.extract_text() or "" for p in reader.pages]
-            raw = "\n\n".join(p.strip() for p in pages if p.strip())
-            if not raw.strip():
-                raise HTTPException(status_code=400, detail="No text found in PDF — it may be scanned/image-only")
-            text, extract_cost = _llm_clean_pdf(raw, name)
-        elif ext == "csv":
-            import csv
-            raw = data.decode("utf-8", errors="replace")
-            rows = list(csv.reader(io.StringIO(raw)))
-            extract_cost = 0.0
-            if rows and len(rows) <= 200:
-                header = rows[0]
-                sep = ["---"] * len(header)
-                body = rows[1:]
-                lines = [
-                    "| " + " | ".join(header) + " |",
-                    "| " + " | ".join(sep) + " |",
-                ] + ["| " + " | ".join(r) + " |" for r in body]
-                text = "\n".join(lines)
-            else:
-                text = "\n".join(", ".join(r) for r in rows)
-        else:
-            text = data.decode("utf-8", errors="replace")
-            extract_cost = 0.0
-    except HTTPException:
-        raise
+        text, extract_cost = extract_file_bytes(data, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not extract text: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read file: {e}")
 
     if not text.strip():
-        raise HTTPException(status_code=400, detail="No text content found in file")
+        raise HTTPException(status_code=400, detail="No content extracted from file")
 
-    size_kb = round(len(data) / 1024, 1)
-    return {"filename": name, "text": text[:20000], "chars": len(text), "size_kb": size_kb, "cost_usd": extract_cost}
+    return {
+        "filename": name,
+        "text": text,
+        "chars": len(text),
+        "size_kb": size_kb,
+        "cost_usd": extract_cost,
+    }
 
 
 # ---------------------------------------------------------------------------

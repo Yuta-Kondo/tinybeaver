@@ -92,6 +92,9 @@ DEFAULT_MODEL = "claude-sonnet-5"
 # only requires editing one line.
 UTILITY_MODEL = "claude-haiku-4-5-20251001"
 
+# Vision + document extraction for attachments (Gemini native multimodal).
+FILE_EXTRACTION_MODEL = "gemini-3.5-flash"
+
 # Multi-agent (MoA) pipeline — keep in sync with frontend/src/lib/models.ts MOA_*.
 MOA_SYNTHESIS_MODEL = "claude-sonnet-5"
 
