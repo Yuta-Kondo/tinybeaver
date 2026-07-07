@@ -6,7 +6,7 @@ import rehypeKatex from "rehype-katex";
 import type { Message } from "../hooks/useChat";
 import hljs from "highlight.js/lib/common";
 import { fetchTopic, sendFeedback } from "../lib/api";
-import { modelLabel } from "../lib/models";
+import { MOA_AGENTS, MOA_SYNTHESIS_MODEL, moaAgentModel, moaPipelineLabel, modelLabel, modelShortLabel } from "../lib/models";
 import Icon from "./Icon";
 import MapCard from "./MapCard";
 
@@ -132,7 +132,7 @@ function StatusLine({ status }: { status: "searching" | "memory_updating" | "rea
     status === "searching"       ? "Searching the web…" :
     status === "reading_email"   ? "Reading emails…" :
     status === "moa_brainstorm"  ? "Consulting 3 agents…" :
-    status === "moa_synthesizing"? "Synthesizing…" :
+    status === "moa_synthesizing"? `Synthesizing (${modelShortLabel(MOA_SYNTHESIS_MODEL)})…` :
     "Saving to memory…";
   return (
     <div className="status-line">
@@ -218,10 +218,15 @@ function formatCost(usd: number): string {
   return `$${usd.toFixed(4)}`;
 }
 
-const AGENT_ORDER = ["Comprehensive", "Concise", "Critical"];
-const AGENT_ICON: Record<string, string> = { Comprehensive: "🔍", Concise: "⚡", Critical: "🎯" };
+const AGENT_ORDER = MOA_AGENTS.map((a) => a.persona);
+const AGENT_ICON: Record<string, string> = { Advocate: "💡", Skeptic: "🔍", Minimalist: "⚡" };
 
-function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: string; done?: boolean }[]; streaming: boolean }) {
+function draftModelLabel(draft: { persona: string; model?: string }): string {
+  const id = draft.model || moaAgentModel(draft.persona);
+  return id ? modelShortLabel(id) : "";
+}
+
+function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: string; model?: string; done?: boolean }[]; streaming: boolean }) {
   const [open, setOpen] = useState(true);
   const userToggled = useRef(false);
 
@@ -238,9 +243,9 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
   const currentAgent = drafts.find((d) => !d.done);
   const label = streaming && doneCnt < 3
     ? currentAgent
-      ? `Agent ${doneCnt + 1}/3 · ${currentAgent.persona} writing…`
+      ? `Agent ${doneCnt + 1}/3 · ${currentAgent.persona} (${draftModelLabel(currentAgent)})…`
       : `Starting agent ${doneCnt + 1}/3…`
-    : `Agent discussion · ${drafts.length} responses`;
+    : `Agent discussion · ${drafts.length} responses · ${moaPipelineLabel()}`;
 
   return (
     <div className="moa-drafts">
@@ -253,10 +258,15 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
           {AGENT_ORDER.map((name) => {
             const d = drafts.find((x) => x.persona === name);
             if (!d) {
+              const modelId = moaAgentModel(name);
               return streaming ? (
                 <div key={name} className="moa-draft-item moa-draft-item--pending">
                   <span className="status-dot" />
-                  <span className="moa-draft-pending-name">{AGENT_ICON[name]} {name} starting…</span>
+                  <span className="moa-draft-pending-name">
+                    {AGENT_ICON[name]} {name}
+                    {modelId && <span className="moa-draft-model">{modelShortLabel(modelId)}</span>}
+                    {" "}starting…
+                  </span>
                 </div>
               ) : null;
             }
@@ -265,6 +275,9 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
                 <div className="moa-draft-persona">
                   <span>{AGENT_ICON[name] ?? "·"}</span>
                   {name}
+                  {draftModelLabel(d) && (
+                    <span className="moa-draft-model">{draftModelLabel(d)}</span>
+                  )}
                   {!d.done && <span className="moa-agent-streaming"> · writing…</span>}
                 </div>
                 <div className="moa-draft-text">
@@ -436,7 +449,14 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
         {(model || fetchedUrls?.length || loadedTopics?.length || updatedTopics?.length || costUsd) ? (
           <div className="topic-meta">
             {model && !streaming && (
-              <span className="topic-tag topic-tag--model" title="Model used">{modelLabel(model)}</span>
+              <span
+                className="topic-tag topic-tag--model"
+                title={model === "moa" ? moaPipelineLabel() : "Model used"}
+              >
+                {model === "moa"
+                  ? `Multi → ${modelShortLabel(MOA_SYNTHESIS_MODEL)}`
+                  : modelLabel(model)}
+              </span>
             )}
             {costUsd != null && !streaming && formatCost(costUsd) && (
               <span

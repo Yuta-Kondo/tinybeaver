@@ -23,7 +23,7 @@ export interface GeoLocation {
 }
 
 export interface StreamEvent {
-  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing" | "moa_draft" | "moa_draft_delta" | "moa_agent_done";
+  type: "start" | "delta" | "done" | "error" | "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing" | "moa_draft" | "moa_draft_delta" | "moa_agent_start" | "moa_agent_done";
   session_id?: string;
   message_id?: number | null;
   user_message_id?: number | null;
@@ -39,6 +39,7 @@ export interface StreamEvent {
   locations?: GeoLocation[];
   search_sources?: { n: number; url: string; title: string }[];
   moa_persona?: string;
+  moa_model?: string;
   moa_text?: string;
 }
 
@@ -134,7 +135,7 @@ export async function searchSessions(q: string): Promise<SessionSearchResult[]> 
 
 export async function fetchSessionMessages(
   id: string
-): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; moa_drafts?: { persona: string; text: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
+): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
   const r = await fetch(`/sessions/${id}/messages`);
   if (!r.ok) return [];
   const data = await r.json();

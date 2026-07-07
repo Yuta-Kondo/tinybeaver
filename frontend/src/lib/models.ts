@@ -26,6 +26,33 @@ export const MODELS: ModelOption[] = [
 /** Default model — must match backend `DEFAULT_MODEL`. */
 export const DEFAULT_MODEL = "claude-sonnet-5";
 
+/** MoA pipeline — keep in sync with backend/models.py MOA_* */
+export const MOA_SYNTHESIS_MODEL = "claude-sonnet-5";
+
+export const MOA_AGENTS = [
+  { persona: "Advocate", model: "gemini-3.5-flash" },
+  { persona: "Skeptic", model: "glm-5.2" },
+  { persona: "Minimalist", model: "claude-haiku-4-5-20251001" },
+] as const;
+
+/** Short display name, e.g. "Flash 3.5" or "Sonnet 5". */
+export function modelShortLabel(id: string): string {
+  const opt = MODELS.find((m) => m.id === id);
+  if (opt) return `${opt.name} ${opt.version}`;
+  return modelLabel(id);
+}
+
+/** One-line summary of the full MoA pipeline for tooltips. */
+export function moaPipelineLabel(): string {
+  const agents = MOA_AGENTS.map((a) => modelShortLabel(a.model)).join(" · ");
+  return `${agents} → ${modelShortLabel(MOA_SYNTHESIS_MODEL)}`;
+}
+
+/** Model id for a MoA persona (falls back to empty string). */
+export function moaAgentModel(persona: string): string {
+  return MOA_AGENTS.find((a) => a.persona === persona)?.model ?? "";
+}
+
 /** Quick allow-list derived from MODELS (replaces inline arrays). */
 export const ALLOWED_MODELS: string[] = MODELS.map((m) => m.id);
 

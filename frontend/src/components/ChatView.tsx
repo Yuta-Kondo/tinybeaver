@@ -5,7 +5,7 @@ import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
 import { deleteMessage, extractFile } from "../lib/api";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
-import { MODELS, findModel } from "../lib/models";
+import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 
 interface PendingFile extends AttachedFile {
   key: string;
@@ -615,7 +615,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
               onClick={() => onMultiAgentChange(!multiAgent)}
               type="button"
               disabled={streaming}
-              title="Multi-agent: 3×Gemini Flash → Sonnet synthesis"
+              title={moaPipelineLabel()}
             >
               <svg viewBox="0 0 14 14" fill="none" width="12" height="12">
                 <circle cx="3" cy="7" r="2" fill="currentColor" opacity="0.7"/>
@@ -625,6 +625,11 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
               </svg>
               Multi
             </button>
+            {multiAgent && (
+              <span className="moa-pipeline-hint" title={moaPipelineLabel()}>
+                {moaPipelineLabel()}
+              </span>
+            )}
           </div>
           <span className="input-hint-inline desktop-only">Enter to send · Shift+Enter for newline</span>
         </div>

@@ -92,6 +92,48 @@ DEFAULT_MODEL = "claude-sonnet-5"
 # only requires editing one line.
 UTILITY_MODEL = "claude-haiku-4-5-20251001"
 
+# Multi-agent (MoA) pipeline — keep in sync with frontend/src/lib/models.ts MOA_*.
+MOA_SYNTHESIS_MODEL = "claude-sonnet-5"
+
+
+@dataclass(frozen=True)
+class MoAAgentDef:
+    persona: str
+    model: str
+    provider: str
+    temperature: float
+    instruction: str
+
+
+MOA_AGENTS: tuple[MoAAgentDef, ...] = (
+    MoAAgentDef(
+        "Advocate",
+        "gemini-3.5-flash",
+        PROVIDER_GEMINI,
+        0.8,
+        "Give your best recommendation: what should Yuta do and why? Cover relevant context "
+        "and tradeoffs, then state a clear top recommendation.",
+    ),
+    MoAAgentDef(
+        "Skeptic",
+        "glm-5.2",
+        PROVIDER_GLM,
+        1.0,
+        "Stress-test the Advocate's recommendation. Identify wrong assumptions, risks, failure "
+        "modes, and overlooked alternatives. If the recommendation is flawed, argue for a "
+        "different approach — do not merely add caveats. If you agree on the conclusion, you "
+        "must still surface at least one non-obvious risk or alternative they underweighted.",
+    ),
+    MoAAgentDef(
+        "Minimalist",
+        UTILITY_MODEL,
+        PROVIDER_ANTHROPIC,
+        0.7,
+        "Given the debate above, what is the smallest concrete action Yuta can take this week "
+        "that moves the needle? What can be deferred or skipped? Push back on over-planning.",
+    ),
+)
+
 
 def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimate USD cost from token counts and the model's pricing."""

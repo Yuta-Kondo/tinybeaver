@@ -53,6 +53,8 @@ from .models import (
     ALLOWED_MODELS,
     DEFAULT_MODEL,
     MODELS,
+    MOA_AGENTS,
+    MOA_SYNTHESIS_MODEL,
     PROVIDER_ANTHROPIC,
     PROVIDER_GEMINI,
     PROVIDER_GLM,
@@ -802,126 +804,127 @@ def chat_stream(req: ChatRequest):
         )
 
     def generate_moa():
-        """MoA: 3 Gemini Flash agents in parallel → Claude Sonnet synthesizer."""
-        import os, concurrent.futures
-
-        try:
-            from google import genai as google_genai
-            from google.genai import types as gtypes
-        except ImportError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'google-genai not installed'})}\n\n"
+        """MoA: Advocate (Flash) → Skeptic (GLM) → Minimalist (Haiku) → Sonnet synthesis."""
+        if not os.getenv("GOOGLE_API_KEY"):
+            yield sse({"type": "error", "message": "GOOGLE_API_KEY not configured"})
             return
-
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'GOOGLE_API_KEY not configured'})}\n\n"
+        if not os.getenv("ZAI_API_KEY"):
+            yield sse({"type": "error", "message": "ZAI_API_KEY not configured (required for Skeptic agent)"})
             return
 
         meta = {"type": "start", "session_id": session_id, "loaded_topics": relevant_topics, "user_message_id": user_msg_id}
-        if new_topic: meta["new_topic"] = new_topic
-        if urls: meta["fetched_urls"] = urls
-        yield f"data: {json.dumps(meta)}\n\n"
-        yield f"data: {json.dumps({'type': 'moa_brainstorm'})}\n\n"
+        if new_topic:
+            meta["new_topic"] = new_topic
+        if urls:
+            meta["fetched_urls"] = urls
+        yield sse(meta)
+        yield sse({"type": "moa_brainstorm"})
 
-        # Convert Anthropic message format → Gemini
-        def _to_parts(content):
-            if isinstance(content, str):
-                return [gtypes.Part.from_text(text=content)]
-            parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text":
-                    parts.append(gtypes.Part.from_text(text=block["text"]))
-                elif block.get("type") == "image":
-                    src = block.get("source", {})
-                    if src.get("type") == "base64":
-                        import base64 as _b64
-                        parts.append(gtypes.Part.from_bytes(
-                            data=_b64.b64decode(src["data"]),
-                            mime_type=src.get("media_type", "image/jpeg"),
-                        ))
-            return parts or [gtypes.Part.from_text(text="")]
+        system_str = flatten_system(system)
 
-        gemini_msgs = [
-            gtypes.Content(
-                role="model" if m["role"] == "assistant" else "user",
-                parts=_to_parts(m["content"]),
+        drafts: list[tuple[str, str, str]] = []
+        agents_cost = 0.0
+
+        for agent_idx, agent in enumerate(MOA_AGENTS):
+            persona, model_id, provider, temperature, instruction = (
+                agent.persona,
+                agent.model,
+                agent.provider,
+                agent.temperature,
+                agent.instruction,
             )
-            for m in messages_for_api
-        ]
-
-        # Flatten Anthropic list[dict] system → plain string for Gemini
-        if isinstance(system, list):
-            system_str = "\n\n".join(b.get("text", "") for b in system if isinstance(b, dict))
-        else:
-            system_str = system
-
-        AGENTS = [
-            ("Comprehensive", "Explore all aspects thoroughly: background, context, nuance, and implications."),
-            ("Concise",       "Cut to the core. Read what was said above, then give the 2-3 most important points directly. Agree, disagree, or add what was missed."),
-            ("Critical",      "Challenge assumptions. Read what was said above, then identify edge cases, counterarguments, risks, and what could go wrong."),
-        ]
-
-        drafts: list[tuple[str, str]] = []
-        flash_cost = 0.0
-
-        for agent_idx, (persona, instruction) in enumerate(AGENTS):
-            # Build debate context: show all previous agents' responses
+            yield sse({"type": "moa_agent_start", "moa_persona": persona, "moa_model": model_id})
             if drafts:
                 prior = "\n\n".join(
-                    f"[{p} — Agent {i+1}]\n{t}"
-                    for i, (p, t) in enumerate(drafts)
+                    f"[{p} — Agent {i + 1}]\n{t}"
+                    for i, (p, t, _) in enumerate(drafts)
                 )
                 agent_system = (
-                    system_str
-                    + f"\n\nYou are Agent {agent_idx + 1} of 3 in a multi-agent discussion. "
+                    f"{system_str}\n\n"
+                    f"You are Agent {agent_idx + 1} of 3 in a multi-agent discussion. "
                     f"The agents before you have already responded:\n\n{prior}\n\n"
                     f"Your role ({persona}): {instruction}"
                 )
             else:
                 agent_system = (
-                    system_str
-                    + f"\n\nYou are Agent 1 of 3 in a multi-agent discussion. "
+                    f"{system_str}\n\n"
+                    f"You are Agent 1 of 3 in a multi-agent discussion. "
                     f"Your role ({persona}): {instruction}"
                 )
 
-            client_g = google_genai.Client(api_key=api_key)
-            cfg = gtypes.GenerateContentConfig(
-                system_instruction=agent_system,
-                temperature=0.8,
-            )
             full = ""
             in_tok = out_tok = 0
             try:
-                for chunk in client_g.models.generate_content_stream(
-                    model="gemini-3.5-flash", contents=gemini_msgs, config=cfg,
-                ):
-                    if chunk.text:
-                        full += chunk.text
-                        yield f"data: {json.dumps({'type': 'moa_draft_delta', 'moa_persona': persona, 'moa_text': chunk.text})}\n\n"
-                    u = getattr(chunk, "usage_metadata", None)
-                    if u:
-                        in_tok = getattr(u, "prompt_token_count", 0) or 0
-                        out_tok = getattr(u, "candidates_token_count", 0) or 0
+                if provider == PROVIDER_GEMINI:
+                    for text, tin, tout in stream_gemini(
+                        model=model_id,
+                        messages_for_api=messages_for_api,
+                        system=agent_system,
+                        temperature=temperature,
+                    ):
+                        if text:
+                            full += text
+                            yield sse({"type": "moa_draft_delta", "moa_persona": persona, "moa_model": model_id, "moa_text": text})
+                        in_tok, out_tok = tin or in_tok, tout or out_tok
+                elif provider == PROVIDER_GLM:
+                    for text, tin, tout in stream_glm(
+                        model="zai/glm-5.2",
+                        messages_for_api=messages_for_api,
+                        system=agent_system,
+                        temperature=temperature,
+                    ):
+                        if text:
+                            full += text
+                            yield sse({"type": "moa_draft_delta", "moa_persona": persona, "moa_model": model_id, "moa_text": text})
+                        in_tok, out_tok = tin or in_tok, tout or out_tok
+                else:
+                    with _client.messages.stream(
+                        model=model_id,
+                        max_tokens=2048,
+                        system=agent_system,
+                        messages=messages_for_api,
+                        temperature=temperature,
+                    ) as stream:
+                        for event in stream:
+                            if getattr(event, "type", None) == "content_block_delta":
+                                delta = getattr(event, "delta", None)
+                                if delta and getattr(delta, "type", None) == "text_delta":
+                                    full += delta.text
+                                    yield sse({
+                                        "type": "moa_draft_delta",
+                                        "moa_persona": persona,
+                                        "moa_model": model_id,
+                                        "moa_text": delta.text,
+                                    })
+                        try:
+                            final = stream.get_final_message()
+                            in_tok = final.usage.input_tokens
+                            out_tok = final.usage.output_tokens
+                        except Exception:
+                            pass
             except Exception as e:
                 full = f"[Error: {e}]"
-            flash_cost += _calc_cost("gemini-3.5-flash", in_tok, out_tok)
-            drafts.append((persona, full))
-            yield f"data: {json.dumps({'type': 'moa_agent_done', 'moa_persona': persona})}\n\n"
+            agents_cost += _calc_cost(model_id, in_tok, out_tok)
+            drafts.append((persona, full, model_id))
+            yield sse({"type": "moa_agent_done", "moa_persona": persona, "moa_model": model_id})
 
-        valid = [(p, t) for p, t in drafts if t and not t.startswith("[Error")]
+        valid = [(p, t, m) for p, t, m in drafts if t and not t.startswith("[Error")]
         if not valid:
-            errors = "; ".join(t for _, t in drafts)
+            errors = "; ".join(t for _, t, _ in drafts)
             yield f"data: {json.dumps({'type': 'error', 'message': f'All agents failed: {errors}'})}\n\n"
             return
 
-        yield f"data: {json.dumps({'type': 'moa_synthesizing'})}\n\n"
+        yield sse({"type": "moa_synthesizing", "moa_model": MOA_SYNTHESIS_MODEL})
 
-        draft_block = "\n\n".join(f"<agent name=\"{p}\" index=\"{i+1}\">\n{t}\n</agent>" for i, (p, t) in enumerate(drafts))
+        draft_block = "\n\n".join(
+            f'<agent name="{p}" index="{i + 1}">\n{t}\n</agent>'
+            for i, (p, t, _) in enumerate(drafts)
+        )
         synthesis_msg = (
-            f"Three agents had a sequential debate about the user's query — each agent read the previous agents' responses before writing their own. "
-            f"Now synthesize the best possible unified response: take the strongest insights, incorporate critiques, and resolve any disagreements into a clear, well-structured answer.\n\n"
+            "Three agents (Advocate, Skeptic, Minimalist) debated the user's query sequentially — "
+            "each read prior responses before writing. Synthesize the best unified answer: keep the "
+            "strongest recommendation, honor valid critiques, preserve concrete next steps, and "
+            "resolve disagreements explicitly rather than averaging them away.\n\n"
             f"<user_query>{req.message}</user_query>\n\n"
             f"<debate>\n{draft_block}\n</debate>"
         )
@@ -930,7 +933,7 @@ def chat_stream(req: ChatRequest):
         chat_cost = 0.0
         try:
             with _client.messages.stream(
-                model="claude-sonnet-5",
+                model=MOA_SYNTHESIS_MODEL,
                 max_tokens=4096,
                 system=system,
                 messages=[{"role": "user", "content": synthesis_msg}],
@@ -943,7 +946,7 @@ def chat_stream(req: ChatRequest):
                             yield f"data: {json.dumps({'type': 'delta', 'text': delta.text})}\n\n"
                 try:
                     final = stream.get_final_message()
-                    chat_cost = _calc_cost("claude-sonnet-5", final.usage.input_tokens, final.usage.output_tokens)
+                    chat_cost = _calc_cost(MOA_SYNTHESIS_MODEL, final.usage.input_tokens, final.usage.output_tokens)
                 except Exception:
                     pass
         except Exception as e:
@@ -962,7 +965,11 @@ def chat_stream(req: ChatRequest):
                     row = get_topic(slug)
                     existing = row["content"] if row else ""
                     save_topic(slug, f"{existing}\n- {fact}".strip())
-            drafts_for_db = [{"persona": p, "text": t, "done": True} for p, t in drafts if not t.startswith("[Error")]
+            drafts_for_db = [
+                {"persona": p, "text": t, "model": m, "done": True}
+                for p, t, m in drafts
+                if not t.startswith("[Error")
+            ]
             assistant_msg_id = save_message(session_id, "assistant", clean_text, moa_drafts=drafts_for_db or None)
             if update_topics:
                 yield f"data: {json.dumps({'type': 'memory_updating'})}\n\n"
@@ -978,10 +985,13 @@ def chat_stream(req: ChatRequest):
 
         locations = _extract_maps(full_text)
         clean_text = _strip_maps(clean_text)
-        total_cost = round(flash_cost + chat_cost + memory_cost, 6)
+        total_cost = round(agents_cost + chat_cost + memory_cost, 6)
         import logging as _log
-        _log.getLogger(__name__).info("MoA cost: flash=%.6f chat=%.6f memory=%.6f total=%.6f", flash_cost, chat_cost, memory_cost, total_cost)
-        cost_bd = {'chat': round(flash_cost + chat_cost, 6), 'memory': round(memory_cost, 6)}
+        _log.getLogger(__name__).info(
+            "MoA cost: agents=%.6f synth=%.6f memory=%.6f total=%.6f",
+            agents_cost, chat_cost, memory_cost, total_cost,
+        )
+        cost_bd = {"chat": round(agents_cost + chat_cost, 6), "memory": round(memory_cost, 6)}
         if assistant_msg_id is not None:
             update_message_meta(assistant_msg_id, 'moa', total_cost, cost_bd)
         yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': [], 'search_sources': []})}\n\n"

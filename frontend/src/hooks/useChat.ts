@@ -20,7 +20,7 @@ export interface Message {
   costBreakdown?: { chat: number; memory: number };
   locations?: GeoLocation[];
   searchSources?: { n: number; url: string; title: string }[];
-  moaDrafts?: { persona: string; text: string; done?: boolean }[];
+  moaDrafts?: { persona: string; text: string; model?: string; done?: boolean }[];
   isError?: boolean;
   stopped?: boolean;
 }
@@ -119,6 +119,30 @@ export function useChat(sessionId: string | null) {
             updateLastAssistant({ status: "reading_email" });
           } else if (event.type === "moa_brainstorm") {
             updateLastAssistant({ status: "moa_brainstorm" });
+          } else if (event.type === "moa_agent_start" && event.moa_persona) {
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last?.role === "assistant") {
+                const existing = last.moaDrafts ?? [];
+                if (!existing.some((d) => d.persona === event.moa_persona)) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    moaDrafts: [
+                      ...existing,
+                      {
+                        persona: event.moa_persona!,
+                        text: "",
+                        model: event.moa_model ?? undefined,
+                        done: false,
+                      },
+                    ],
+                    status: "moa_brainstorm",
+                  };
+                }
+              }
+              return copy;
+            });
           } else if (event.type === "moa_draft_delta" && event.moa_persona) {
             setMessages((prev) => {
               const copy = [...prev];
@@ -127,8 +151,17 @@ export function useChat(sessionId: string | null) {
                 const existing = last.moaDrafts ?? [];
                 const idx = existing.findIndex((d) => d.persona === event.moa_persona);
                 const newDrafts = idx >= 0
-                  ? existing.map((d, i) => i === idx ? { ...d, text: d.text + (event.moa_text ?? "") } : d)
-                  : [...existing, { persona: event.moa_persona!, text: event.moa_text ?? "", done: false }];
+                  ? existing.map((d, i) => i === idx ? {
+                      ...d,
+                      text: d.text + (event.moa_text ?? ""),
+                      model: event.moa_model ?? d.model,
+                    } : d)
+                  : [...existing, {
+                      persona: event.moa_persona!,
+                      text: event.moa_text ?? "",
+                      model: event.moa_model ?? undefined,
+                      done: false,
+                    }];
                 copy[copy.length - 1] = { ...last, moaDrafts: newDrafts, status: "moa_brainstorm" };
               }
               return copy;
@@ -139,7 +172,9 @@ export function useChat(sessionId: string | null) {
               const last = copy[copy.length - 1];
               if (last?.role === "assistant") {
                 const newDrafts = (last.moaDrafts ?? []).map((d) =>
-                  d.persona === event.moa_persona ? { ...d, done: true } : d
+                  d.persona === event.moa_persona
+                    ? { ...d, done: true, model: event.moa_model ?? d.model }
+                    : d
                 );
                 copy[copy.length - 1] = { ...last, moaDrafts: newDrafts };
               }

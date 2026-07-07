@@ -826,6 +826,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   letter-spacing: 0.06em;
   margin-bottom: 6px;
 }
+.moa-draft-model {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: rgba(124,58,237,0.12);
+  border: 1px solid rgba(167,139,250,0.25);
+  color: var(--t2);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .moa-draft-text {
   color: var(--t2);
   font-size: 12.5px;
@@ -1553,6 +1565,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: rgba(124,58,237,0.12);
 }
 .moa-toggle:disabled { opacity: 0.4; cursor: default; }
+
+.moa-pipeline-hint {
+  font-size: 11px;
+  color: var(--t3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(360px, 45vw);
+}
 
 /* ── Private mode ─────────────────────────────────── */
 .private-toggle {
