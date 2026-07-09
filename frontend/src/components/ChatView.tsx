@@ -426,17 +426,14 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   const canSend = (draft.trim().length > 0 || pendingFiles.some((f) => !f.loading)) && !streaming && !isLoading;
 
   const lastAssistant = messages[messages.length - 1];
+  const assistantBubbleWaiting =
+    streaming &&
+    lastAssistant?.role === "assistant" &&
+    (lastAssistant.streaming || !!lastAssistant.status);
   const inputWaitLabel = isLoading
     ? WAIT_LABELS.fileRead
-    : streaming
-      ? lastAssistant?.role === "assistant"
-        ? lastAssistant.status === "searching" ? WAIT_LABELS.searching
-        : lastAssistant.status === "reading_email" ? WAIT_LABELS.readingEmail
-        : lastAssistant.status === "memory_updating" ? WAIT_LABELS.memory
-        : lastAssistant.status === "moa_brainstorm" ? WAIT_LABELS.moaBrainstorm
-        : lastAssistant.status === "moa_synthesizing" ? WAIT_LABELS.moaSynthesize
-        : WAIT_LABELS.thinking
-      : WAIT_LABELS.thinking
+    : streaming && !assistantBubbleWaiting
+      ? WAIT_LABELS.thinking
       : null;
 
   return (
