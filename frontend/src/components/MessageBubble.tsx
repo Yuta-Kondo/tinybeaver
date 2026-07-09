@@ -9,6 +9,7 @@ import { fetchTopic, sendFeedback } from "../lib/api";
 import { MOA_AGENTS, MOA_SYNTHESIS_MODEL, moaAgentModel, moaPipelineLabel, modelLabel, modelShortLabel } from "../lib/models";
 import Icon from "./Icon";
 import MapCard from "./MapCard";
+import MessageAttachments from "./MessageAttachments";
 
 interface Props {
   message: Message;
@@ -294,7 +295,7 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
 }
 
 export default function MessageBubble({ message, sessionId, onResend, onRegenerate, onRetry, onContinue, onDelete }: Props) {
-  const { id, role, content, images, streaming, status, isError, stopped, newTopic, loadedTopics, updatedTopics, fetchedUrls, model, costUsd, costBreakdown, locations, searchSources, moaDrafts } = message;
+  const { id, role, content, images, attachments, streaming, status, isError, stopped, newTopic, loadedTopics, updatedTopics, fetchedUrls, model, costUsd, costBreakdown, locations, searchSources, moaDrafts } = message;
 
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState(content);
@@ -329,7 +330,10 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
             ✦ New memory topic: <strong>{newTopic}</strong>
           </div>
         )}
-        {images && images.length > 0 && (
+        {attachments && attachments.length > 0 && (
+          <MessageAttachments attachments={attachments} />
+        )}
+        {images && images.length > 0 && !attachments?.length && (
           <div className="message-images">
             {images.map((src, i) => (
               <img
@@ -367,9 +371,9 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
                 <button className="edit-cancel-btn" onClick={cancelEdit}>Cancel</button>
               </div>
             </div>
-          ) : (
+          ) : content ? (
             <div className="user-text">{renderUserContent(content)}</div>
-          )
+          ) : null
         ) : isError ? (
           <div className="error-bubble">
             <span className="error-bubble-icon" aria-hidden="true">⚠</span>

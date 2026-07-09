@@ -116,6 +116,7 @@ _MIGRATIONS = [
     "ALTER TABLE messages ADD COLUMN model TEXT",
     "ALTER TABLE messages ADD COLUMN cost_usd REAL",
     "ALTER TABLE messages ADD COLUMN cost_breakdown TEXT",
+    "ALTER TABLE messages ADD COLUMN attachments TEXT",
 ]
 
 
@@ -369,13 +370,20 @@ def update_session_summary(session_id: str, summary: str, through_count: int) ->
 # Messages API
 # ---------------------------------------------------------------------------
 
-def save_message(session_id: str, role: str, content: str | list, moa_drafts: list | None = None) -> int:
+def save_message(
+    session_id: str,
+    role: str,
+    content: str | list,
+    moa_drafts: list | None = None,
+    attachments: list | None = None,
+) -> int:
     stored = content if isinstance(content, str) else json.dumps(content)
     drafts_json = json.dumps(moa_drafts) if moa_drafts else None
+    attachments_json = json.dumps(attachments) if attachments else None
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO messages (session_id, role, content, moa_drafts) VALUES (?, ?, ?, ?)",
-        (session_id, role, stored, drafts_json),
+        "INSERT INTO messages (session_id, role, content, moa_drafts, attachments) VALUES (?, ?, ?, ?, ?)",
+        (session_id, role, stored, drafts_json, attachments_json),
     )
     conn.execute(
         "UPDATE sessions SET updated_at = datetime('now') WHERE session_id = ?",
@@ -397,7 +405,7 @@ def update_message_meta(msg_id: int, model: str, cost_usd: float, cost_breakdown
 
 def get_messages(session_id: str) -> list[dict]:
     rows = _get_conn().execute(
-        "SELECT id, role, content, moa_drafts, model, cost_usd, cost_breakdown FROM messages WHERE session_id = ? ORDER BY id",
+        "SELECT id, role, content, moa_drafts, model, cost_usd, cost_breakdown, attachments FROM messages WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
     result = []
@@ -424,9 +432,16 @@ def get_messages(session_id: str) -> list[dict]:
                 cost_breakdown = json.loads(r["cost_breakdown"])
             except (json.JSONDecodeError, TypeError):
                 pass
+        attachments = None
+        if r["attachments"]:
+            try:
+                attachments = json.loads(r["attachments"])
+            except (json.JSONDecodeError, TypeError):
+                pass
         result.append({
             "id": r["id"], "role": r["role"], "content": content, "moa_drafts": moa_drafts,
             "model": r["model"], "cost_usd": r["cost_usd"], "cost_breakdown": cost_breakdown,
+            "attachments": attachments,
         })
     return result
 

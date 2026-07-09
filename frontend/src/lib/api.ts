@@ -1,4 +1,7 @@
 import { DEFAULT_MODEL } from "./models";
+import type { MessageAttachment } from "./attachments";
+
+export type { MessageAttachment } from "./attachments";
 
 export interface SessionInfo {
   session_id: string;
@@ -135,7 +138,7 @@ export async function searchSessions(q: string): Promise<SessionSearchResult[]> 
 
 export async function fetchSessionMessages(
   id: string
-): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
+): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[]; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
   const r = await fetch(`/sessions/${id}/messages`);
   if (!r.ok) return [];
   const data = await r.json();
@@ -324,13 +327,10 @@ export async function fetchEmail(id: string): Promise<EmailDetail> {
   return r.json();
 }
 
-// ---------------------------------------------------------------------------
-// Chat stream
-// ---------------------------------------------------------------------------
-
 export interface AttachedFile {
   name: string;
   text: string;
+  thumb?: string;
 }
 
 export function streamChat(

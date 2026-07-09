@@ -4,6 +4,7 @@ import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
 import { extractFile, fetchTopics } from "../lib/api";
+import { fileIcon } from "../lib/attachments";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 
@@ -132,15 +133,6 @@ function resizeImage(file: File, maxPx: number, quality: number): Promise<string
     img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(objectUrl); fallback(); };
     img.src = objectUrl;
   });
-}
-
-function fileIcon(name: string) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "pdf") return "📄";
-  if (ext === "csv") return "📊";
-  if (["md", "txt"].includes(ext)) return "📝";
-  if (["json"].includes(ext)) return "{ }";
-  return "📎";
 }
 
 const draftKey = (sid: string | null) => `draft:${sid ?? "new"}`;
@@ -373,7 +365,9 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     const text = draft.trim();
     const hasFiles = pendingFiles.some((f) => !f.loading);
     if ((!text && !hasFiles) || streaming) return;
-    const files = pendingFiles.filter((f) => !f.loading).map(({ name, text }) => ({ name, text }));
+    const files = pendingFiles
+      .filter((f) => !f.loading)
+      .map(({ name, text, thumb }) => ({ name, text, thumb }));
     setDraft("");
     try { localStorage.removeItem(draftKey(sessionId)); } catch { /* ignore */ }
     setPendingFiles([]);

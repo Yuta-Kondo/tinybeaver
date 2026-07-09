@@ -1001,6 +1001,124 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .lightbox-close:hover { background: rgba(255, 255, 255, 0.22); }
 
+/* ── Message attachments (sent files in bubbles) ──── */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.message-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 6px 10px 6px 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--gb-em);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.message-attachment:hover {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.06);
+}
+.message-attachment--thumb {
+  padding: 4px;
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 140px;
+}
+.message-attachment-thumb {
+  width: 100%;
+  height: 88px;
+  object-fit: cover;
+  border-radius: calc(var(--r-sm) - 2px);
+  display: block;
+}
+.message-attachment-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.message-attachment-name {
+  font-size: 11px;
+  color: var(--t2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.message-attachment--thumb .message-attachment-name {
+  padding: 0 4px 2px;
+}
+
+.attachment-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  animation: fade-in 0.12s var(--ease) both;
+}
+.attachment-modal {
+  width: min(720px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2);
+  border: 1px solid var(--gb-em);
+  border-radius: var(--r-md);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.attachment-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--gb);
+}
+.attachment-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-modal-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  border: none;
+  background: transparent;
+  color: var(--t3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.attachment-modal-close:hover { color: var(--t1); background: rgba(255, 255, 255, 0.06); }
+.attachment-modal-body {
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--t2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* ── Image previews (input) ───────────────────────── */
 .image-previews {
   display: flex;

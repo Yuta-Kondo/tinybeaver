@@ -158,6 +158,7 @@ def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 class AttachedFile(BaseModel):
     name: str
     text: str  # pre-extracted text content
+    thumb: str | None = None  # data-URL preview (images, PDF first page)
 
 
 class HistoryMessage(BaseModel):

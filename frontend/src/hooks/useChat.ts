@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { type AttachedFile, type GeoLocation, appendMessage, deleteMessage, editMessage, fetchSessionMessages, streamChat } from "../lib/api";
+import { type MessageAttachment, filesToAttachments } from "../lib/attachments";
 import { DEFAULT_MODEL } from "../lib/models";
 
 export type MessageStatus = "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing";
@@ -9,6 +10,7 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   images?: string[];
+  attachments?: MessageAttachment[];
   streaming?: boolean;
   status?: MessageStatus;
   newTopic?: string;
@@ -250,7 +252,8 @@ export function useChat(sessionId: string | null) {
     (text: string, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false) => {
       if (streaming) return;
       lastSendRef.current = { text, onNewSession, images, files, model, multiAgent, privateMode };
-      setMessages((prev) => [...prev, { role: "user", content: text, images }]);
+      const attachments = filesToAttachments(files, images);
+      setMessages((prev) => [...prev, { role: "user", content: text, images, attachments }]);
       setStreaming(true);
       // In private mode, pass current messages as history so backend has context
       const history = privateMode
@@ -320,6 +323,7 @@ export function useChat(sessionId: string | null) {
         id: m.id,
         role: m.role,
         content: m.content,
+        attachments: m.attachments,
         moaDrafts: m.moa_drafts,
         model: m.model ?? undefined,
         costUsd: m.cost_usd ?? undefined,
@@ -379,7 +383,8 @@ export function useChat(sessionId: string | null) {
     try {
       const history = await fetchSessionMessages(id);
       setMessages(history.map((m) => ({
-        id: m.id, role: m.role, content: m.content, moaDrafts: m.moa_drafts,
+        id: m.id, role: m.role, content: m.content, attachments: m.attachments,
+        moaDrafts: m.moa_drafts,
         model: m.model ?? undefined,
         costUsd: m.cost_usd ?? undefined,
         costBreakdown: m.cost_breakdown ?? undefined,

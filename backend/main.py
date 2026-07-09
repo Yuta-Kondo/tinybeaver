@@ -473,6 +473,32 @@ def _extract_urls(message: str) -> list[str]:
     return out
 
 
+_IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif"})
+
+
+def _build_attachments(req: ChatRequest) -> list[dict]:
+    """UI metadata for files/images sent with a user message."""
+    out: list[dict] = []
+    for i, data_url in enumerate(req.images):
+        if data_url.startswith("data:"):
+            out.append({"name": f"image-{i + 1}.png", "kind": "image", "thumb": data_url})
+    for f in req.files:
+        ext = PurePath(f.name).suffix.lstrip(".").lower()
+        if ext in _IMAGE_EXTS:
+            kind = "image"
+        elif ext == "pdf":
+            kind = "pdf"
+        else:
+            kind = "file"
+        att: dict = {"name": f.name, "kind": kind}
+        if f.thumb:
+            att["thumb"] = f.thumb
+        if kind in ("file", "pdf") and f.text:
+            att["text"] = f.text[:80_000]
+        out.append(att)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
@@ -583,7 +609,8 @@ def chat_stream(req: ChatRequest):
 
     user_msg_id = None
     if not req.private and not is_continue:
-        user_msg_id = save_message(session_id, "user", req.message)
+        attachments = _build_attachments(req) or None
+        user_msg_id = save_message(session_id, "user", req.message, attachments=attachments)
         session = get_session(session_id)
         if session and not session["title"]:
             update_session_title(session_id, req.message[:60].strip())
@@ -1161,7 +1188,7 @@ def session_messages(session_id: str):
     if not get_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     msgs = get_messages(session_id)
-    return {"messages": [{"id": m["id"], "role": m["role"], "content": m["content"], "moa_drafts": m.get("moa_drafts"), "model": m.get("model"), "cost_usd": m.get("cost_usd"), "cost_breakdown": m.get("cost_breakdown")} for m in msgs]}
+    return {"messages": [{"id": m["id"], "role": m["role"], "content": m["content"], "moa_drafts": m.get("moa_drafts"), "model": m.get("model"), "cost_usd": m.get("cost_usd"), "cost_breakdown": m.get("cost_breakdown"), "attachments": m.get("attachments")} for m in msgs]}
 
 
 @app.patch("/sessions/{session_id}/messages/{msg_id}")
