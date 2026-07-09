@@ -1511,6 +1511,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .input-wrap {
+  --input-btn: 34px;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -1519,7 +1520,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   -webkit-backdrop-filter: var(--blur);
   border: 1px solid var(--gb-em);
   border-radius: 20px;
-  padding: 8px 8px 8px 12px;
+  padding: 6px 8px 6px 12px;
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
   position: relative;
   overflow: hidden;
@@ -1547,43 +1548,43 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 14px;
   font-family: var(--font);
   resize: none;
-  line-height: 1.6;
+  line-height: 22px;
+  min-height: var(--input-btn);
   max-height: 200px;
   overflow-y: auto;
-  padding: 2px 0;
+  padding: 6px 0;
+  margin: 0;
+  box-sizing: border-box;
 }
-.input-wrap textarea::placeholder { color: var(--t3); }
+.input-wrap textarea::placeholder { color: var(--t3); line-height: 22px; }
 
-.attach-btn {
-  width: 32px; height: 32px;
-  background: transparent;
-  border: 1px solid var(--gb);
-  border-radius: 8px;
-  color: var(--t2);
-  font-size: 18px;
-  cursor: pointer;
+.attach-btn,
+.voice-btn,
+.send-btn {
+  width: var(--input-btn);
+  height: var(--input-btn);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s var(--ease);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), transform 0.1s var(--ease), opacity 0.15s, color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.attach-btn {
+  background: transparent;
+  border: 1px solid var(--gb);
+  border-radius: 10px;
+  color: var(--t2);
 }
 .attach-btn:hover { color: var(--em); border-color: var(--em-border); }
 .attach-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .send-btn {
-  width: 34px; height: 34px;
   background: var(--em-subtle);
   border: 1px solid var(--em-border);
   border-radius: 10px;
   color: var(--em);
-  font-size: 16px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: background 0.15s var(--ease), transform 0.1s var(--ease), opacity 0.15s;
 }
 .send-btn:hover:not(:disabled) {
   background: var(--em-glow);
@@ -1594,17 +1595,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .send-btn:disabled { opacity: 0.25; cursor: not-allowed; }
 
 .voice-btn {
-  width: 32px; height: 32px;
   background: transparent;
   border: 1px solid var(--gb);
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--t2);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s var(--ease);
 }
 .voice-btn:hover { color: var(--em); border-color: var(--em-border); }
 .voice-btn--active {
@@ -2890,9 +2884,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   }
 
   /* Larger touch targets */
-  .send-btn, .attach-btn {
-    min-width: 44px;
-    min-height: 44px;
+  .input-wrap {
+    --input-btn: 44px;
+  }
+  .send-btn, .attach-btn, .voice-btn {
+    width: var(--input-btn);
+    height: var(--input-btn);
+    min-width: var(--input-btn);
+    min-height: var(--input-btn);
+  }
+  .input-wrap textarea {
+    min-height: var(--input-btn);
+    padding: 10px 0;
+    line-height: 24px;
   }
 
   /* Hide desktop-only elements */

@@ -653,7 +653,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
               title={listening ? "Stop dictation" : "Dictate"}
               aria-label={listening ? "Stop dictation" : "Dictate"}
             >
-              <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+              <svg viewBox="0 0 16 16" fill="none" width="17" height="17">
                 <rect x="6" y="1.5" width="4" height="8" rx="2" fill="currentColor"/>
                 <path d="M3.5 7a4.5 4.5 0 009 0M8 11.5v3M5.5 14.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
