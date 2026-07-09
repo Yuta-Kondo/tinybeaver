@@ -158,7 +158,14 @@ def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 class AttachedFile(BaseModel):
     name: str
     text: str  # pre-extracted text content
-    thumb: str | None = None  # data-URL preview (images, PDF first page)
+    thumb: str | None = None  # data-URL preview (images, PDF first page) — UI only
+
+
+class AttachmentMeta(BaseModel):
+    name: str
+    kind: str  # image | pdf | file
+    thumb: str | None = None
+    text: str | None = None  # document preview for click-to-view
 
 
 class HistoryMessage(BaseModel):
@@ -171,6 +178,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     images: list[str] = []      # base64 data URLs
     files: list[AttachedFile] = []  # pre-extracted file contents
+    attachment_meta: list[AttachmentMeta] = []  # lightweight UI previews (no full blobs in files)
     model: str = DEFAULT_MODEL
     multi_agent: bool = False
     private: bool = False

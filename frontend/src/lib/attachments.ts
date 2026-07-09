@@ -25,6 +25,20 @@ export function fileIcon(name: string): string {
   return "📎";
 }
 
+export const ATTACHMENT_THUMB_PX = 480;
+
+export function prepareAttachmentMeta(attachments: MessageAttachment[]): MessageAttachment[] {
+  return attachments.map((a) => ({
+    name: a.name,
+    kind: a.kind,
+    thumb: a.thumb && a.thumb.length <= 120_000 ? a.thumb : undefined,
+    text:
+      (a.kind === "file" || a.kind === "pdf") && a.text
+        ? a.text.slice(0, 32_000)
+        : undefined,
+  }));
+}
+
 export function filesToAttachments(
   files: { name: string; text: string; thumb?: string }[],
   images: string[] = [],
@@ -40,6 +54,7 @@ export function filesToAttachments(
       name: f.name,
       kind,
       thumb: f.thumb,
+      // Images only need the thumbnail for re-view; skip heavy OCR text in UI state.
       text: kind === "file" || kind === "pdf" ? f.text : undefined,
     };
   });

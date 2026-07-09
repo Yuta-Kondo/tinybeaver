@@ -476,12 +476,31 @@ def _extract_urls(message: str) -> list[str]:
 _IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif"})
 
 
+_MAX_ATTACHMENT_THUMB_CHARS = 120_000
+_MAX_ATTACHMENT_TEXT_CHARS = 32_000
+
+
+def _sanitize_attachment(att: dict) -> dict:
+    """Keep attachment payloads small for DB + session history API."""
+    out: dict = {"name": att["name"], "kind": att["kind"]}
+    thumb = att.get("thumb")
+    if thumb and len(thumb) <= _MAX_ATTACHMENT_THUMB_CHARS:
+        out["thumb"] = thumb
+    text = att.get("text")
+    if text and att.get("kind") in ("file", "pdf"):
+        out["text"] = text[:_MAX_ATTACHMENT_TEXT_CHARS]
+    return out
+
+
 def _build_attachments(req: ChatRequest) -> list[dict]:
     """UI metadata for files/images sent with a user message."""
+    if req.attachment_meta:
+        return [_sanitize_attachment(a.model_dump()) for a in req.attachment_meta]
     out: list[dict] = []
     for i, data_url in enumerate(req.images):
         if data_url.startswith("data:"):
-            out.append({"name": f"image-{i + 1}.png", "kind": "image", "thumb": data_url})
+            att = {"name": f"image-{i + 1}.png", "kind": "image", "thumb": data_url}
+            out.append(_sanitize_attachment(att))
     for f in req.files:
         ext = PurePath(f.name).suffix.lstrip(".").lower()
         if ext in _IMAGE_EXTS:
@@ -494,8 +513,8 @@ def _build_attachments(req: ChatRequest) -> list[dict]:
         if f.thumb:
             att["thumb"] = f.thumb
         if kind in ("file", "pdf") and f.text:
-            att["text"] = f.text[:80_000]
-        out.append(att)
+            att["text"] = f.text
+        out.append(_sanitize_attachment(att))
     return out
 
 

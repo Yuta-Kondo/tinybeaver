@@ -1,5 +1,6 @@
 import { DEFAULT_MODEL } from "./models";
 import type { MessageAttachment } from "./attachments";
+import { prepareAttachmentMeta } from "./attachments";
 
 export type { MessageAttachment } from "./attachments";
 
@@ -140,7 +141,7 @@ export async function fetchSessionMessages(
   id: string
 ): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[]; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
   const r = await fetch(`/sessions/${id}/messages`);
-  if (!r.ok) return [];
+  if (!r.ok) throw new Error(`Failed to load messages (${r.status})`);
   const data = await r.json();
   return data.messages;
 }
@@ -339,6 +340,7 @@ export function streamChat(
   onEvent: (e: StreamEvent) => void,
   images: string[] = [],
   files: AttachedFile[] = [],
+  attachmentMeta: MessageAttachment[] = [],
   model = DEFAULT_MODEL,
   multiAgent = false,
   privateMode = false,
@@ -346,12 +348,25 @@ export function streamChat(
   continueMessageId: number | null = null
 ): () => void {
   const controller = new AbortController();
+  const apiFiles = files.map(({ name, text }) => ({ name, text }));
+  const meta = prepareAttachmentMeta(attachmentMeta);
 
   (async () => {
     const resp = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: sessionId, images, files, model, multi_agent: multiAgent, private: privateMode, history, continue_message_id: continueMessageId }),
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+        images,
+        files: apiFiles,
+        attachment_meta: meta,
+        model,
+        multi_agent: multiAgent,
+        private: privateMode,
+        history,
+        continue_message_id: continueMessageId,
+      }),
       signal: controller.signal,
     });
 

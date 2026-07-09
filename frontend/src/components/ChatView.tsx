@@ -4,7 +4,7 @@ import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
 import { extractFile, fetchTopics } from "../lib/api";
-import { fileIcon } from "../lib/attachments";
+import { fileIcon, ATTACHMENT_THUMB_PX } from "../lib/attachments";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 
@@ -247,7 +247,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     let thumb: string | undefined;
     if (isImage) {
       try {
-        thumb = await resizeImage(file, 1920, 0.82);
+        thumb = await resizeImage(file, ATTACHMENT_THUMB_PX, 0.8);
       } catch {
         /* preview optional */
       }

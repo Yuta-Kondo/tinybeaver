@@ -54,7 +54,8 @@ export function useChat(sessionId: string | null) {
   // Remembers the last send so a failed turn can be retried verbatim.
   const lastSendRef = useRef<null | {
     text: string; onNewSession: (id: string) => void; images: string[];
-    files: AttachedFile[]; model: string; multiAgent: boolean; privateMode: boolean;
+    files: AttachedFile[]; attachmentMeta: MessageAttachment[];
+    model: string; multiAgent: boolean; privateMode: boolean;
   }>(null);
   // Tracks the active session for resend-after-edit
   const activeSessionRef = useRef<string | null>(sessionId);
@@ -72,7 +73,7 @@ export function useChat(sessionId: string | null) {
   };
 
   const _stream = useCallback(
-    (text: string, sid: string | null, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false, history: { role: string; content: string }[] = [], continueMessageId: number | null = null) => {
+    (text: string, sid: string | null, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], attachmentMeta: MessageAttachment[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false, history: { role: string; content: string }[] = [], continueMessageId: number | null = null) => {
       currentPrivateRef.current = privateMode;
       const isContinue = continueMessageId != null;
       let resolvedSession = sid;
@@ -238,6 +239,7 @@ export function useChat(sessionId: string | null) {
         },
         images,
         files,
+        attachmentMeta,
         model,
         multiAgent,
         privateMode,
@@ -251,15 +253,15 @@ export function useChat(sessionId: string | null) {
   const sendMessage = useCallback(
     (text: string, onNewSession: (id: string) => void, images: string[] = [], files: AttachedFile[] = [], model = DEFAULT_MODEL, multiAgent = false, privateMode = false) => {
       if (streaming) return;
-      lastSendRef.current = { text, onNewSession, images, files, model, multiAgent, privateMode };
       const attachments = filesToAttachments(files, images);
+      lastSendRef.current = { text, onNewSession, images, files, attachmentMeta: attachments, model, multiAgent, privateMode };
       setMessages((prev) => [...prev, { role: "user", content: text, images, attachments }]);
       setStreaming(true);
       // In private mode, pass current messages as history so backend has context
       const history = privateMode
         ? messages.map((m) => ({ role: m.role, content: m.content })).filter((m) => m.content)
         : [];
-      _stream(text, activeSessionRef.current, onNewSession, images, files, model, multiAgent, privateMode, history);
+      _stream(text, activeSessionRef.current, onNewSession, images, files, attachments, model, multiAgent, privateMode, history);
     },
     [streaming, _stream, messages]
   );
@@ -282,7 +284,7 @@ export function useChat(sessionId: string | null) {
       ? base.filter((m) => m.content && !m.isError).map((m) => ({ role: m.role, content: m.content }))
       : [];
     setStreaming(true);
-    _stream(last.text, activeSessionRef.current, last.onNewSession, last.images, last.files, last.model, last.multiAgent, last.privateMode, history);
+    _stream(last.text, activeSessionRef.current, last.onNewSession, last.images, last.files, last.attachmentMeta, last.model, last.multiAgent, last.privateMode, history);
   }, [streaming, _stream, messages]);
 
   // Continue a stopped assistant reply — resumes streaming into the same bubble.
@@ -295,6 +297,7 @@ export function useChat(sessionId: string | null) {
         "",
         activeSessionRef.current,
         () => {},
+        [],
         [],
         [],
         last?.model ?? DEFAULT_MODEL,
@@ -330,7 +333,7 @@ export function useChat(sessionId: string | null) {
         costBreakdown: m.cost_breakdown ?? undefined,
       })));
       setStreaming(true);
-      _stream(newContent, activeSessionRef.current, onNewSession, [], [], model, multiAgent, privateMode);
+      _stream(newContent, activeSessionRef.current, onNewSession, [], [], [], model, multiAgent, privateMode);
     },
     [streaming, _stream],
   );
@@ -377,6 +380,7 @@ export function useChat(sessionId: string | null) {
   }, []);
 
   const loadSession = useCallback(async (id: string) => {
+    cancelRef.current?.();
     setStreaming(false);
     setMessages([]);
     setLoadingSession(true);
@@ -389,6 +393,8 @@ export function useChat(sessionId: string | null) {
         costUsd: m.cost_usd ?? undefined,
         costBreakdown: m.cost_breakdown ?? undefined,
       })));
+    } catch (e) {
+      console.error("Failed to load session:", e);
     } finally {
       setLoadingSession(false);
     }

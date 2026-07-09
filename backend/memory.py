@@ -370,6 +370,22 @@ def update_session_summary(session_id: str, summary: str, through_count: int) ->
 # Messages API
 # ---------------------------------------------------------------------------
 
+_MAX_ATTACHMENT_THUMB_CHARS = 120_000
+_MAX_ATTACHMENT_TEXT_CHARS = 32_000
+
+
+def _sanitize_stored_attachment(att: dict) -> dict:
+    """Strip oversized legacy attachment blobs when loading session history."""
+    out: dict = {"name": att.get("name", "file"), "kind": att.get("kind", "file")}
+    thumb = att.get("thumb")
+    if isinstance(thumb, str) and len(thumb) <= _MAX_ATTACHMENT_THUMB_CHARS:
+        out["thumb"] = thumb
+    text = att.get("text")
+    if isinstance(text, str) and out["kind"] in ("file", "pdf"):
+        out["text"] = text[:_MAX_ATTACHMENT_TEXT_CHARS]
+    return out
+
+
 def save_message(
     session_id: str,
     role: str,
@@ -435,7 +451,9 @@ def get_messages(session_id: str) -> list[dict]:
         attachments = None
         if r["attachments"]:
             try:
-                attachments = json.loads(r["attachments"])
+                raw = json.loads(r["attachments"])
+                if isinstance(raw, list):
+                    attachments = [_sanitize_stored_attachment(a) for a in raw if isinstance(a, dict)]
             except (json.JSONDecodeError, TypeError):
                 pass
         result.append({
