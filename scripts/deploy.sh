@@ -8,8 +8,11 @@ VPS_IP="${1:?Usage: ./scripts/deploy.sh <VPS_IP>}"
 SSH="ssh -o StrictHostKeyChecking=accept-new root@$VPS_IP"
 REMOTE=/app
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NODE_BIN="$ROOT/node-v20.19.2-darwin-arm64/bin"
+
 echo "==> Building React frontend..."
-(cd frontend && PATH="/private/tmp/node-v20.19.2-darwin-arm64/bin:$PATH" npm run build)
+(cd frontend && PATH="$NODE_BIN:$PATH" npm run build)
 
 echo "==> Transferring app files to $VPS_IP..."
 rsync -az --delete \
