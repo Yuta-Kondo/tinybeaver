@@ -10,6 +10,7 @@ import { MOA_AGENTS, MOA_SYNTHESIS_MODEL, moaAgentModel, moaPipelineLabel, model
 import Icon from "./Icon";
 import MapCard from "./MapCard";
 import MessageAttachments from "./MessageAttachments";
+import { TypingIndicator, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 
 interface Props {
   message: Message;
@@ -130,17 +131,12 @@ function CodeBlock({ lang, code }: { lang?: string; code: string }) {
 
 function StatusLine({ status }: { status: "searching" | "memory_updating" | "reading_email" | "moa_brainstorm" | "moa_synthesizing" }) {
   const label =
-    status === "searching"       ? "Searching the web…" :
-    status === "reading_email"   ? "Reading emails…" :
-    status === "moa_brainstorm"  ? "Consulting 3 agents…" :
-    status === "moa_synthesizing"? `Synthesizing (${modelShortLabel(MOA_SYNTHESIS_MODEL)})…` :
-    "Saving to memory…";
-  return (
-    <div className="status-line">
-      <span className="status-dot" />
-      {label}
-    </div>
-  );
+    status === "searching"        ? WAIT_LABELS.searching :
+    status === "reading_email"    ? WAIT_LABELS.readingEmail :
+    status === "moa_brainstorm"   ? WAIT_LABELS.moaBrainstorm :
+    status === "moa_synthesizing" ? WAIT_LABELS.moaSynthesize :
+    WAIT_LABELS.memory;
+  return <WaitingIndicator label={label} size="md" className="status-line" />;
 }
 
 function TopicTag({ slug, variant }: { slug: string; variant: "loaded" | "updated" }) {
@@ -181,7 +177,7 @@ function TopicTag({ slug, variant }: { slug: string; variant: "loaded" | "update
             <button className="topic-popover-close" onClick={() => setOpen(false)} aria-label="Close"><Icon name="close" size={12} /></button>
           </div>
           <div className="topic-popover-body">
-            {loading ? "Loading…" : content}
+            {loading ? <WaitingIndicator label={WAIT_LABELS.topic} size="sm" /> : content}
           </div>
         </div>
       )}
@@ -279,7 +275,7 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
                   {draftModelLabel(d) && (
                     <span className="moa-draft-model">{draftModelLabel(d)}</span>
                   )}
-                  {!d.done && <span className="moa-agent-streaming"> · writing…</span>}
+                  {!d.done && <WaitingIndicator label="Writing" size="sm" className="moa-agent-streaming" />}
                 </div>
                 <div className="moa-draft-text">
                   {d.text}
@@ -412,8 +408,8 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
                 {content}
               </ReactMarkdown>
             )}
-            {streaming && !status && <span className="cursor" />}
-            {streaming && !content && !status && <span className="cursor" />}
+            {streaming && !content && !status && <TypingIndicator />}
+            {streaming && content && !status && <span className="cursor" aria-hidden="true" />}
             {stopped && (
               <span className="stopped-label">
                 <Icon name="stop" size={9} /> Stopped

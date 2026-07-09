@@ -7,6 +7,7 @@ import { extractFile, fetchTopics } from "../lib/api";
 import { fileIcon, ATTACHMENT_THUMB_PX } from "../lib/attachments";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
+import { ChatSessionSkeleton, Spinner, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 
 interface PendingFile extends AttachedFile {
   key: string;
@@ -424,6 +425,20 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   const isLoading = pendingFiles.some((f) => f.loading);
   const canSend = (draft.trim().length > 0 || pendingFiles.some((f) => !f.loading)) && !streaming && !isLoading;
 
+  const lastAssistant = messages[messages.length - 1];
+  const inputWaitLabel = isLoading
+    ? WAIT_LABELS.fileRead
+    : streaming
+      ? lastAssistant?.role === "assistant"
+        ? lastAssistant.status === "searching" ? WAIT_LABELS.searching
+        : lastAssistant.status === "reading_email" ? WAIT_LABELS.readingEmail
+        : lastAssistant.status === "memory_updating" ? WAIT_LABELS.memory
+        : lastAssistant.status === "moa_brainstorm" ? WAIT_LABELS.moaBrainstorm
+        : lastAssistant.status === "moa_synthesizing" ? WAIT_LABELS.moaSynthesize
+        : WAIT_LABELS.thinking
+      : WAIT_LABELS.thinking
+      : null;
+
   return (
     <div
       className={`chat-area${dragOver ? " drag-over" : ""}${privateMode ? " chat-area--private" : ""}`}
@@ -489,12 +504,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
       <div className="messages" ref={scrollRef} onScroll={handleScroll}>
         {loadingSession ? (
-          <div className="session-skeleton" aria-label="Loading conversation">
-            <div className="skeleton-row skeleton-row--user"><div className="skeleton-line" style={{ width: "38%" }} /></div>
-            <div className="skeleton-row"><div className="skeleton-line" style={{ width: "82%" }} /><div className="skeleton-line" style={{ width: "70%" }} /><div className="skeleton-line" style={{ width: "48%" }} /></div>
-            <div className="skeleton-row skeleton-row--user"><div className="skeleton-line" style={{ width: "30%" }} /></div>
-            <div className="skeleton-row"><div className="skeleton-line" style={{ width: "76%" }} /><div className="skeleton-line" style={{ width: "60%" }} /></div>
-          </div>
+          <ChatSessionSkeleton />
         ) : messages.length === 0 ? (
             <div className="empty-state">
               <img src="/favicon.png" alt="tinybeaver" className={`empty-state-logo${privateMode ? " empty-state-logo--private" : ""}`} />
@@ -540,14 +550,21 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
       )}
 
       <div className="input-bar">
+        {inputWaitLabel && (
+          <div className="input-wait-bar" role="status" aria-live="polite">
+            <WaitingIndicator label={inputWaitLabel} size="sm" />
+          </div>
+        )}
         {/* File chips */}
         {pendingFiles.length > 0 && (
           <div className="file-chips">
             {pendingFiles.map((f, i) => (
               <div key={f.key ?? i} className={`file-chip${f.loading ? " file-chip--loading" : ""}${f.thumb ? " file-chip--pdf" : ""}`}>
-                {f.thumb
+                {f.loading
+                  ? <span className="file-chip-icon file-chip-icon--spin"><Spinner size="sm" /></span>
+                  : f.thumb
                   ? <img src={f.thumb} alt="Preview" className="file-chip-thumb" title="Click to preview" onClick={() => setPdfPreview(f.thumb!)} />
-                  : <span className="file-chip-icon">{f.loading ? "⏳" : fileIcon(f.name)}</span>}
+                  : <span className="file-chip-icon">{fileIcon(f.name)}</span>}
                 <div className="file-chip-info">
                   <span className="file-chip-name">{f.name}</span>
                   {!f.loading && (
@@ -556,7 +573,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
                       {f.costUsd && f.costUsd > 0.00001 ? ` · ${f.costUsd < 0.01 ? `${(f.costUsd * 100).toFixed(2)}¢` : `$${f.costUsd.toFixed(4)}`}` : ""}
                     </span>
                   )}
-                  {f.loading && <span className="file-chip-size">Reading with Flash…</span>}
+                  {f.loading && <span className="file-chip-size">{WAIT_LABELS.fileRead}</span>}
                 </div>
                 {!f.loading && (
                   <button className="file-chip-remove" onClick={() => removeFile(i)} title="Remove"><Icon name="close" size={11} /></button>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { type Task, createTask, deleteTask, fetchTasks, toggleTask } from "../lib/api";
 import Icon from "./Icon";
+import { WaitingIndicator } from "./WaitingIndicator";
 
 const TIMES = [
   { label: "Morning",      time: "8:00 AM",  emoji: "🌅", value: "daily 08:00" },
@@ -186,7 +187,7 @@ export default function TasksPanel() {
           {error && <p className="task-error">{error}</p>}
           <div className="task-form-actions">
             <button className="task-save-btn" onClick={handleCreate} disabled={saving}>
-              {saving ? "Saving…" : "Create task"}
+              {saving ? <WaitingIndicator label="Saving…" size="sm" /> : "Create task"}
             </button>
             <button className="task-cancel-btn" onClick={() => { setCreating(false); setError(""); }}>
               Cancel

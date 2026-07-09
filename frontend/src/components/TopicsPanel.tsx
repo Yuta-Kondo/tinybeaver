@@ -14,6 +14,7 @@ import {
   semanticSearchTopics,
 } from "../lib/api";
 import Icon from "./Icon";
+import { WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 
 export default function TopicsPanel() {
   const [topics, setTopics] = useState<TopicSummary[]>([]);
@@ -29,6 +30,8 @@ export default function TopicsPanel() {
   const [error, setError] = useState("");
   const [reindexing, setReindexing] = useState(false);
   const [reindexMsg, setReindexMsg] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [loadingSlug, setLoadingSlug] = useState<string | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadTopics = useCallback(async () => {
@@ -46,7 +49,8 @@ export default function TopicsPanel() {
   // Debounced search: semantic first, fall back to FTS
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    if (!query.trim()) { setSearchResults(null); return; }
+    if (!query.trim()) { setSearchResults(null); setSearching(false); return; }
+    setSearching(true);
     searchTimer.current = setTimeout(async () => {
       try {
         // Try semantic search first
@@ -58,12 +62,15 @@ export default function TopicsPanel() {
         }
       } catch {
         setSearchResults(await searchTopics(query.trim()).catch(() => []));
+      } finally {
+        setSearching(false);
       }
     }, 300);
     return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
   }, [query]);
 
   async function openTopic(slug: string) {
+    setLoadingSlug(slug);
     try {
       const detail = await fetchTopic(slug);
       setSelected(detail);
@@ -71,6 +78,8 @@ export default function TopicsPanel() {
       setError("");
     } catch {
       setError("Failed to load topic.");
+    } finally {
+      setLoadingSlug(null);
     }
   }
 
@@ -171,13 +180,18 @@ export default function TopicsPanel() {
 
       {/* Topic list */}
       <div className="topics-list">
-        {displayList.length === 0 && query && (
+        {searching && (
+          <div className="topics-list-wait">
+            <WaitingIndicator label="Searching memory…" size="sm" />
+          </div>
+        )}
+        {!searching && displayList.length === 0 && query && (
           <p className="topics-empty">No results for "{query}"</p>
         )}
         {displayList.map((t) => (
           <button
             key={t.slug}
-            className={`topic-row ${selected?.slug === t.slug ? "active" : ""}`}
+            className={`topic-row ${selected?.slug === t.slug ? "active" : ""}${loadingSlug === t.slug ? " topic-row--loading" : ""}`}
             onClick={() => openTopic(t.slug)}
           >
             <span className="topic-slug">{t.slug}</span>
@@ -218,7 +232,7 @@ export default function TopicsPanel() {
           disabled={reindexing}
           title="Rebuild semantic search embeddings for all topics"
         >
-          {reindexing ? "Reindexing…" : "↻ Reindex"}
+          {reindexing ? <WaitingIndicator label="Reindexing…" size="sm" /> : "↻ Reindex"}
         </button>
         <button
           className="topics-footer-btn reflect-btn"
@@ -226,7 +240,7 @@ export default function TopicsPanel() {
           disabled={reflecting}
           title="Ask Haiku to consolidate and clean all topics"
         >
-          {reflecting ? "Reflecting…" : "⟳ Reflect"}
+          {reflecting ? <WaitingIndicator label="Reflecting…" size="sm" /> : "⟳ Reflect"}
         </button>
       </div>
 
@@ -264,7 +278,7 @@ export default function TopicsPanel() {
               onClick={handleSave}
               disabled={saving || editContent === selected.content}
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? <WaitingIndicator label="Saving…" size="sm" /> : "Save"}
             </button>
             <button className="cancel-topic-btn" onClick={() => setEditContent(selected.content)}>
               Reset

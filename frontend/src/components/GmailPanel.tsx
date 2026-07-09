@@ -9,6 +9,7 @@ import {
   gmailStatus,
 } from "../lib/api";
 import Icon from "./Icon";
+import { WaitingBlock, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 
 interface Props {
   onSendToChat?: (text: string) => void;
@@ -110,7 +111,7 @@ export default function GmailPanel({ onSendToChat }: Props) {
     onSendToChat(text);
   };
 
-  if (!status) return <div className="gmail-loading">Loading…</div>;
+  if (!status) return <WaitingBlock label={WAIT_LABELS.gmail} className="gmail-loading" />;
 
   if (!status.connected) {
     return (
@@ -155,11 +156,11 @@ export default function GmailPanel({ onSendToChat }: Props) {
         </div>
       ) : (
         <div className="gmail-list">
-          {loading && <div className="gmail-loading">Loading…</div>}
+          {loading && <WaitingBlock label={WAIT_LABELS.gmail} className="gmail-loading" />}
           {!loading && emails.length === 0 && (
             <div className="gmail-empty">No emails found</div>
           )}
-          {loadingDetail && <div className="gmail-loading">Opening…</div>}
+          {loadingDetail && <WaitingBlock label={WAIT_LABELS.gmailOpen} className="gmail-loading" />}
           {emails.map((e) => (
             <div key={e.id} className="gmail-item" onClick={() => openEmail(e.id)}>
               <div className="gmail-item-from">{senderName(e.from)}</div>
