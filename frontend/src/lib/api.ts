@@ -355,7 +355,19 @@ export function streamChat(
       signal: controller.signal,
     });
 
-    if (!resp.body) return;
+    if (!resp.ok) {
+      let detail = `Request failed (${resp.status})`;
+      try {
+        const data = await resp.json();
+        if (typeof data?.detail === "string") detail = data.detail;
+      } catch { /* ignore */ }
+      onEvent({ type: "error", message: detail });
+      return;
+    }
+    if (!resp.body) {
+      onEvent({ type: "error", message: "Empty response from server" });
+      return;
+    }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";

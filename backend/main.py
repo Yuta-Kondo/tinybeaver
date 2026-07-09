@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from dotenv import load_dotenv
 
