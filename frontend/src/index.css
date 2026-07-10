@@ -746,6 +746,55 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 
 /* ── Shared waiting UI ──────────────────────────── */
+.beaver-loader {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  overflow: visible;
+}
+.beaver-loader svg {
+  overflow: visible;
+  display: block;
+  shape-rendering: geometricPrecision;
+}
+.beaver-loader circle {
+  shape-rendering: geometricPrecision;
+}
+
+.beaver-loader__track {
+  transform-origin: 24px 40px;
+  animation: beaver-walk 0.85s ease-in-out infinite;
+}
+.beaver-loader__step--a {
+  transform-origin: 24px 40px;
+  animation: beaver-step-a 0.85s steps(1, end) infinite;
+}
+.beaver-loader__step--b {
+  transform-origin: 24px 40px;
+  animation: beaver-step-b 0.85s steps(1, end) infinite;
+}
+
+@keyframes beaver-walk {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(2.5px); }
+}
+@keyframes beaver-step-a {
+  0%, 49.99% { opacity: 1; transform: translateY(0) rotate(0deg); }
+  50%, 100% { opacity: 0; }
+}
+@keyframes beaver-step-b {
+  0%, 49.99% { opacity: 0; }
+  50%, 100% { opacity: 1; transform: translateY(1.2px) rotate(2deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .beaver-loader__track { animation: none; }
+  .beaver-loader__step--b { display: none; }
+  .beaver-loader__step--a { animation: none; opacity: 1; transform: none; }
+}
+
 .wait-spinner {
   display: inline-block;
   border-radius: 50%;

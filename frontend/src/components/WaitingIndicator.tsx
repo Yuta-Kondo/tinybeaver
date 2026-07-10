@@ -1,5 +1,7 @@
 /** Shared loading / waiting UI used across chat, panels, and attachments. */
 
+import BeaverLoader from "./BeaverLoader";
+
 type Size = "sm" | "md";
 
 interface WaitingProps {
@@ -9,15 +11,11 @@ interface WaitingProps {
 }
 
 export function Spinner({ size = "md" }: { size?: Size }) {
-  return <span className={`wait-spinner wait-spinner--${size}`} aria-hidden="true" />;
+  return <BeaverLoader size={size === "sm" ? "sm" : "md"} />;
 }
 
 export function WaitingDots({ size = "md" }: { size?: Size }) {
-  return (
-    <span className={`wait-dots wait-dots--${size}`} aria-hidden="true">
-      <span /><span /><span />
-    </span>
-  );
+  return <BeaverLoader size={size === "sm" ? "sm" : "md"} />;
 }
 
 /** Inline spinner + label — status lines, file chips, popovers. */
@@ -34,7 +32,7 @@ export function WaitingIndicator({ label, size = "md", className = "" }: Waiting
 export function WaitingBlock({ label = "Loading…", className = "" }: { label?: string; className?: string }) {
   return (
     <div className={`wait-block ${className}`.trim()} role="status" aria-live="polite">
-      <Spinner size="md" />
+      <BeaverLoader size="lg" />
       <span className="wait-label">{label}</span>
     </div>
   );
