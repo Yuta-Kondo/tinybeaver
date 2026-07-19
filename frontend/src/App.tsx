@@ -143,6 +143,16 @@ export default function App() {
     fetchSessions().then(setSessions).catch(() => {});
   }, []);
 
+  // Allocate a session id up front so documents can be attached to a brand-new
+  // chat before the first message is sent. The backend accepts a client-supplied
+  // session_id and creates the row lazily.
+  const ensureSession = useCallback((): string => {
+    if (activeId) return activeId;
+    const id = crypto.randomUUID();
+    setActiveId(id);
+    return id;
+  }, [activeId]);
+
   // Global keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -270,6 +280,7 @@ export default function App() {
         onRetry={retryLast}
         onContinue={continueMessage}
         onDeleteMessage={deleteMessageFromSession}
+        onEnsureSession={ensureSession}
         onMenuOpen={() => setSidebarOpen(true)}
         model={model}
         onModelChange={handleModelChange}

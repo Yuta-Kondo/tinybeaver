@@ -247,6 +247,43 @@ export async function extractFile(file: File): Promise<{ filename: string; text:
 }
 
 // ---------------------------------------------------------------------------
+// Session documents — persist for the whole conversation
+// ---------------------------------------------------------------------------
+
+export interface SessionDocument {
+  id: number;
+  name: string;
+  kind: "image" | "pdf" | "file";
+  chars: number;
+  size_kb: number;
+  cost_usd: number;
+  created_at?: string;
+}
+
+export async function listSessionDocuments(sessionId: string): Promise<SessionDocument[]> {
+  const r = await fetch(`/sessions/${sessionId}/documents`);
+  if (!r.ok) throw new Error("Failed to load documents");
+  const data = await r.json();
+  return data.documents ?? [];
+}
+
+export async function uploadSessionDocument(sessionId: string, file: File): Promise<SessionDocument> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch(`/sessions/${sessionId}/documents`, { method: "POST", body: form });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: "Failed to upload document" }));
+    throw new Error(err.detail ?? "Failed to upload document");
+  }
+  return r.json();
+}
+
+export async function deleteSessionDocument(sessionId: string, docId: number): Promise<void> {
+  const r = await fetch(`/sessions/${sessionId}/documents/${docId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error("Failed to delete document");
+}
+
+// ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------
 

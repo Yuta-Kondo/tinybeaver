@@ -106,6 +106,21 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     auth        TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS session_documents (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'file',
+    text        TEXT NOT NULL DEFAULT '',
+    chars       INTEGER NOT NULL DEFAULT 0,
+    size_kb     REAL NOT NULL DEFAULT 0,
+    cost_usd    REAL NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_documents_session
+    ON session_documents(session_id, id);
 """
 
 # Migration: add columns that may not exist in older DBs
@@ -311,6 +326,7 @@ def list_sessions() -> list[dict]:
         FROM   sessions s
         LEFT JOIN messages m ON m.session_id = s.session_id
         GROUP  BY s.session_id
+        HAVING COUNT(m.id) > 0
         ORDER  BY s.updated_at DESC
         """
     ).fetchall()
@@ -501,6 +517,74 @@ def delete_message(session_id: str, msg_id: int) -> bool:
     conn = _get_conn()
     cur = conn.execute(
         "DELETE FROM messages WHERE id = ? AND session_id = ?", (msg_id, session_id)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Session documents — files uploaded to a chat that persist for the whole
+# session and are re-injected into the model's context on every turn.
+# ---------------------------------------------------------------------------
+
+def _document_row(r: sqlite3.Row, include_text: bool) -> dict:
+    out = {
+        "id": r["id"],
+        "name": r["name"],
+        "kind": r["kind"],
+        "chars": r["chars"],
+        "size_kb": r["size_kb"],
+        "cost_usd": r["cost_usd"],
+        "created_at": r["created_at"],
+    }
+    if include_text:
+        out["text"] = r["text"]
+    return out
+
+
+def add_session_document(
+    session_id: str,
+    name: str,
+    kind: str,
+    text: str,
+    chars: int,
+    size_kb: float,
+    cost_usd: float,
+) -> dict:
+    conn = _get_conn()
+    # Ensure a session row exists so documents can be attached before the
+    # first message (new chats create the session lazily).
+    save_session(session_id)
+    cur = conn.execute(
+        "INSERT INTO session_documents (session_id, name, kind, text, chars, size_kb, cost_usd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, name, kind, text, chars, size_kb, cost_usd),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id, name, kind, chars, size_kb, cost_usd, created_at "
+        "FROM session_documents WHERE id = ?",
+        (cur.lastrowid,),
+    ).fetchone()
+    return _document_row(row, include_text=False)
+
+
+def get_session_documents(session_id: str, include_text: bool = False) -> list[dict]:
+    cols = "id, name, kind, chars, size_kb, cost_usd, created_at"
+    if include_text:
+        cols += ", text"
+    rows = _get_conn().execute(
+        f"SELECT {cols} FROM session_documents WHERE session_id = ? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    return [_document_row(r, include_text) for r in rows]
+
+
+def delete_session_document(session_id: str, doc_id: int) -> bool:
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM session_documents WHERE id = ? AND session_id = ?",
+        (doc_id, session_id),
     )
     conn.commit()
     return cur.rowcount > 0

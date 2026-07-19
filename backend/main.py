@@ -24,14 +24,17 @@ from . import gmail as gmail_module
 from .classifier import classify
 from .llm import anthropic_client, finalize_stream, llm_json, sse, strip_code_fence
 from .memory import (
+    add_session_document,
     available_topics,
     create_topic,
     delete_message,
     delete_session_db,
+    delete_session_document,
     delete_task,
     edit_message,
     get_api_messages,
     get_session,
+    get_session_documents,
     get_task,
     get_topics_content,
     list_sessions,
@@ -296,7 +299,35 @@ def _strip_maps(text: str) -> str:
     return _MAP_RE.sub("", text).strip()
 
 
-def _build_system(context: str, summary: str) -> list[dict]:
+# Total characters of uploaded-document text injected into context per turn.
+# Keeps the prompt bounded when several large files are attached to a session.
+_MAX_SESSION_DOC_CONTEXT_CHARS = 120_000
+
+
+def _session_documents_context(session_id: str) -> str:
+    """Assemble the text of all documents attached to a session, bounded by a
+    total-size budget so many/large uploads can't blow up the context window."""
+    docs = get_session_documents(session_id, include_text=True)
+    if not docs:
+        return ""
+    parts: list[str] = []
+    used = 0
+    for d in docs:
+        text = d.get("text") or ""
+        if not text.strip():
+            continue
+        remaining = _MAX_SESSION_DOC_CONTEXT_CHARS - used
+        if remaining <= 0:
+            parts.append(f"[Additional document \"{d['name']}\" omitted — context budget reached]")
+            break
+        truncated = text[:remaining]
+        note = "" if len(truncated) == len(text) else "\n[...document truncated to fit context...]"
+        parts.append(f"### {d['name']}\n{truncated}{note}")
+        used += len(truncated)
+    return "\n\n".join(parts)
+
+
+def _build_system(context: str, summary: str, documents: str = "") -> list[dict]:
     from datetime import date
     today = date.today().strftime("%Y-%m-%d")
     blocks: list[dict] = [
@@ -307,6 +338,17 @@ def _build_system(context: str, summary: str) -> list[dict]:
         blocks.append({"type": "text", "text": f"## Earlier conversation summary\n\n{summary}"})
     if context:
         blocks.append({"type": "text", "text": f"## Memory\n\n{context}"})
+    if documents:
+        blocks.append({
+            "type": "text",
+            "text": (
+                "## Attached documents\n\n"
+                "The user uploaded the following document(s) to this conversation. "
+                "Treat them as authoritative context and refer to them when relevant "
+                "throughout the chat.\n\n" + documents
+            ),
+            "cache_control": {"type": "ephemeral"},
+        })
     return blocks
 
 
@@ -536,7 +578,7 @@ def chat_stream(req: ChatRequest):
         new_topic = None
         update_topics = []
         api_messages, summary = get_api_messages(session_id)
-        system = _build_system("", summary)
+        system = _build_system("", summary, _session_documents_context(session_id))
     elif req.private:
         # Private mode: no DB, no memory
         all_topics = []
@@ -564,7 +606,7 @@ def chat_stream(req: ChatRequest):
         update_topics = relevant_topics + ([new_topic] if new_topic else [])
         context = load_context(relevant_topics)
         api_messages, summary = get_api_messages(session_id)
-        system = _build_system(context, summary)
+        system = _build_system(context, summary, _session_documents_context(session_id))
 
     # Fetch URLs in message (parallel)
     urls = _extract_urls(req.message)
@@ -1178,6 +1220,61 @@ async def extract_file(file: UploadFile = File(...)):
         "size_kb": size_kb,
         "cost_usd": extract_cost,
     }
+
+
+def _doc_kind(name: str) -> str:
+    ext = PurePath(name).suffix.lstrip(".").lower()
+    if ext in _IMAGE_EXTS:
+        return "image"
+    if ext == "pdf":
+        return "pdf"
+    return "file"
+
+
+# ---------------------------------------------------------------------------
+# Session documents — persist for the whole conversation, injected every turn
+# ---------------------------------------------------------------------------
+
+@app.get("/sessions/{session_id}/documents")
+def session_documents_list(session_id: str):
+    return {"documents": get_session_documents(session_id, include_text=False)}
+
+
+@app.post("/sessions/{session_id}/documents")
+async def session_document_add(session_id: str, file: UploadFile = File(...)):
+    from .file_extract import extract_file_bytes
+
+    data = await file.read()
+    name = file.filename or "attachment"
+    size_kb = round(len(data) / 1024, 1)
+
+    try:
+        text, extract_cost = extract_file_bytes(data, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read file: {e}")
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="No content extracted from file")
+
+    doc = add_session_document(
+        session_id=session_id,
+        name=name,
+        kind=_doc_kind(name),
+        text=text,
+        chars=len(text),
+        size_kb=size_kb,
+        cost_usd=extract_cost,
+    )
+    return doc
+
+
+@app.delete("/sessions/{session_id}/documents/{doc_id}")
+def session_document_delete(session_id: str, doc_id: int):
+    if not delete_session_document(session_id, doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

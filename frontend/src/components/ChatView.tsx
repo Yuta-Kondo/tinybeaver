@@ -3,19 +3,19 @@ import MessageBubble from "./MessageBubble";
 import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
-import { extractFile, fetchTopics } from "../lib/api";
-import { fileIcon, ATTACHMENT_THUMB_PX } from "../lib/attachments";
-import { renderPdfThumbnail } from "../lib/pdfThumb";
+import { deleteSessionDocument, fetchTopics, listSessionDocuments, uploadSessionDocument } from "../lib/api";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
-import { ChatSessionSkeleton, Spinner, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
+import { ChatSessionSkeleton, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 import SelectionToolbar from "./SelectionToolbar";
+import DocumentsPanel, { type DocItem } from "./DocumentsPanel";
 
-interface PendingFile extends AttachedFile {
-  key: string;
-  sizeKb: number;
-  costUsd?: number;
-  loading?: boolean;
-  thumb?: string;  // first-page preview for PDFs
+const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif"]);
+
+function docKind(name: string): "image" | "pdf" | "file" {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (IMAGE_EXTS.has(ext)) return "image";
+  if (ext === "pdf") return "pdf";
+  return "file";
 }
 
 function ModelDropdown({ model, onModelChange, disabled }: { model: string; onModelChange: (m: string) => void; disabled: boolean }) {
@@ -85,6 +85,7 @@ interface Props {
   onRetry: () => void;
   onContinue: (msgId: number) => void;
   onDeleteMessage: (msgId: number) => Promise<void>;
+  onEnsureSession: () => string;
   onMenuOpen: () => void;
   model: string;
   onModelChange: (m: string) => void;
@@ -100,43 +101,6 @@ export interface ChatViewHandle {
   setDraft: (text: string) => void;
 }
 
-function readAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => resolve(e.target?.result as string ?? "");
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function resizeImage(file: File, maxPx: number, quality: number): Promise<string> {
-  return new Promise((resolve) => {
-    const fallback = () => readAsDataUrl(file).then(resolve).catch(() => resolve(""));
-    const objectUrl = URL.createObjectURL(file);
-    const img = new Image();
-    // Timeout in case img never fires on iOS
-    const timer = setTimeout(() => { URL.revokeObjectURL(objectUrl); fallback(); }, 8000);
-    img.onload = () => {
-      clearTimeout(timer);
-      URL.revokeObjectURL(objectUrl);
-      try {
-        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        if (!ctx) { fallback(); return; }
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
-      } catch {
-        fallback();
-      }
-    };
-    img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(objectUrl); fallback(); };
-    img.src = objectUrl;
-  });
-}
-
 const draftKey = (sid: string | null) => `draft:${sid ?? "new"}`;
 
 // Web Speech API (Chrome/Safari expose webkit-prefixed). Undefined elsewhere.
@@ -145,15 +109,14 @@ const SpeechRecognitionImpl: any =
     ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     : undefined;
 
-const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, loadingSession, sessionId, onSend, onCancel, onResend, onRetry, onContinue, onDeleteMessage, onMenuOpen, model, onModelChange, multiAgent, onMultiAgentChange, privateMode, privateLocked, onPrivateModeChange }, ref) {
+const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages, streaming, loadingSession, sessionId, onSend, onCancel, onResend, onRetry, onContinue, onDeleteMessage, onEnsureSession, onMenuOpen, model, onModelChange, multiAgent, onMultiAgentChange, privateMode, privateLocked, onPrivateModeChange }, ref) {
   const [draft, setDraft] = useState(() => {
     try { return localStorage.getItem(draftKey(sessionId)) ?? ""; } catch { return ""; }
   });
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [documents, setDocuments] = useState<DocItem[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [listening, setListening] = useState(false);
-  const [pdfPreview, setPdfPreview] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -169,6 +132,24 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
       .then((topics) => setTopicSlugs(topics.map((t) => t.slug)))
       .catch(() => {});
   }, []);
+
+  // Load documents attached to this session. Merge-preserve any in-flight
+  // uploads so allocating a fresh session id (new chat) doesn't wipe them.
+  useEffect(() => {
+    if (!sessionId) {
+      setDocuments((prev) => prev.filter((d) => d.loading));
+      return;
+    }
+    let cancelled = false;
+    listSessionDocuments(sessionId)
+      .then((docs) => {
+        if (cancelled) return;
+        const loaded: DocItem[] = docs.map((d) => ({ ...d, key: `d${d.id}` }));
+        setDocuments((prev) => [...loaded, ...prev.filter((d) => d.loading)]);
+      })
+      .catch(() => { if (!cancelled) setDocuments((prev) => prev.filter((d) => d.loading)); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   useImperativeHandle(ref, () => ({
     focusInput: () => textareaRef.current?.focus(),
@@ -239,45 +220,20 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
-  // ── File handling (all types → LLM extraction via /files/extract) ──
+  // ── Document handling — uploads persist for the whole session ──
+  // Files go to /sessions/{id}/documents, are extracted server-side (Gemini),
+  // and are re-injected into the model's context on every turn of this chat.
 
   async function processFile(file: File) {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff"].includes(ext);
-
+    const sid = onEnsureSession();
     const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    let thumb: string | undefined;
-    if (isImage) {
-      try {
-        thumb = await resizeImage(file, ATTACHMENT_THUMB_PX, 0.8);
-      } catch {
-        /* preview optional */
-      }
-    }
-
-    const placeholder: PendingFile = { key, name: file.name, text: "", sizeKb: 0, loading: true, thumb };
-    setPendingFiles((p) => [...p, placeholder]);
-
-    if (ext === "pdf") {
-      renderPdfThumbnail(file).then((pdfThumb) => {
-        if (pdfThumb) {
-          setPendingFiles((p) => p.map((f) => (f.key === key ? { ...f, thumb: pdfThumb } : f)));
-        }
-      });
-    }
-
+    setDocuments((d) => [...d, { key, name: file.name, kind: docKind(file.name), loading: true }]);
     try {
-      const result = await extractFile(file);
-      setPendingFiles((p) =>
-        p.map((f) =>
-          f.key === key
-            ? { ...f, name: result.filename, text: result.text, sizeKb: result.size_kb, costUsd: result.cost_usd, loading: false }
-            : f
-        )
-      );
+      const doc = await uploadSessionDocument(sid, file);
+      setDocuments((d) => d.map((it) => (it.key === key ? { ...doc, key } : it)));
     } catch (e: any) {
-      setPendingFiles((p) => p.filter((f) => f.key !== key));
-      alert(`Could not read "${file.name}": ${e.message}`);
+      setDocuments((d) => d.filter((it) => it.key !== key));
+      alert(`Could not add "${file.name}": ${e.message}`);
     }
   }
 
@@ -292,8 +248,18 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     Array.from(e.dataTransfer.files).forEach(processFile);
   }
 
-  function removeFile(idx: number) {
-    setPendingFiles((p) => p.filter((_, i) => i !== idx));
+  async function removeDocument(id: number) {
+    const sid = sessionId;
+    if (!sid) return;
+    setDocuments((d) => d.filter((it) => it.id !== id));
+    try {
+      await deleteSessionDocument(sid, id);
+    } catch {
+      // Reload to resync if the delete failed.
+      listSessionDocuments(sid)
+        .then((docs) => setDocuments(docs.map((doc) => ({ ...doc, key: `d${doc.id}` }))))
+        .catch(() => {});
+    }
   }
 
   // ── Paste ──────────────────────────────────────────
@@ -365,16 +331,12 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
   function submit() {
     const text = draft.trim();
-    const hasFiles = pendingFiles.some((f) => !f.loading);
-    if ((!text && !hasFiles) || streaming) return;
-    const files = pendingFiles
-      .filter((f) => !f.loading)
-      .map(({ name, text, thumb }) => ({ name, text, thumb }));
+    if (!text || streaming || uploadingDocs) return;
     setDraft("");
     try { localStorage.removeItem(draftKey(sessionId)); } catch { /* ignore */ }
-    setPendingFiles([]);
     snapToBottom();
-    onSend(text, [], files);
+    // Documents live server-side for the session; no per-message files needed.
+    onSend(text, [], []);
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
@@ -423,15 +385,15 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     await onDeleteMessage(msgId);
   }
 
-  const isLoading = pendingFiles.some((f) => f.loading);
-  const canSend = (draft.trim().length > 0 || pendingFiles.some((f) => !f.loading)) && !streaming && !isLoading;
+  const uploadingDocs = documents.some((d) => d.loading);
+  const canSend = draft.trim().length > 0 && !streaming && !uploadingDocs;
 
   const lastAssistant = messages[messages.length - 1];
   const assistantBubbleWaiting =
     streaming &&
     lastAssistant?.role === "assistant" &&
     (lastAssistant.streaming || !!lastAssistant.status);
-  const inputWaitLabel = isLoading
+  const inputWaitLabel = uploadingDocs
     ? WAIT_LABELS.fileRead
     : streaming && !assistantBubbleWaiting
       ? WAIT_LABELS.thinking
@@ -452,6 +414,12 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
 
       {/* Desktop topbar — hidden on mobile (mobile-header handles it) */}
       <div className="chat-topbar">
+        <DocumentsPanel
+          documents={documents}
+          onAddClick={() => fileInputRef.current?.click()}
+          onRemove={removeDocument}
+          disabled={streaming}
+        />
         <button
           className={`private-toggle private-toggle--topbar${privateMode ? " private-toggle--active" : ""}`}
           onClick={() => onPrivateModeChange(!privateMode)}
@@ -474,6 +442,13 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <span /><span /><span />
         </button>
         <span className="mobile-title">tinybeaver</span>
+        <div className="mobile-header-actions">
+        <DocumentsPanel
+          documents={documents}
+          onAddClick={() => fileInputRef.current?.click()}
+          onRemove={removeDocument}
+          disabled={streaming}
+        />
         <button
           className={`private-toggle private-toggle--topbar${privateMode ? " private-toggle--active" : ""}`}
           onClick={() => onPrivateModeChange(!privateMode)}
@@ -488,6 +463,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           </svg>
           Private
         </button>
+        </div>
       </div>
 
       {privateMode && (
@@ -555,34 +531,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
             <WaitingIndicator label={inputWaitLabel} size="sm" />
           </div>
         )}
-        {/* File chips */}
-        {pendingFiles.length > 0 && (
-          <div className="file-chips">
-            {pendingFiles.map((f, i) => (
-              <div key={f.key ?? i} className={`file-chip${f.loading ? " file-chip--loading" : ""}${f.thumb ? " file-chip--pdf" : ""}`}>
-                {f.loading
-                  ? <span className="file-chip-icon file-chip-icon--spin"><Spinner size="sm" /></span>
-                  : f.thumb
-                  ? <img src={f.thumb} alt="Preview" className="file-chip-thumb" title="Click to preview" onClick={() => setPdfPreview(f.thumb!)} />
-                  : <span className="file-chip-icon">{fileIcon(f.name)}</span>}
-                <div className="file-chip-info">
-                  <span className="file-chip-name">{f.name}</span>
-                  {!f.loading && (
-                    <span className="file-chip-size">
-                      {f.sizeKb > 0 ? `${f.sizeKb} KB` : ""}
-                      {f.costUsd && f.costUsd > 0.00001 ? ` · ${f.costUsd < 0.01 ? `${(f.costUsd * 100).toFixed(2)}¢` : `$${f.costUsd.toFixed(4)}`}` : ""}
-                    </span>
-                  )}
-                  {f.loading && <span className="file-chip-size">{WAIT_LABELS.fileRead}</span>}
-                </div>
-                {!f.loading && (
-                  <button className="file-chip-remove" onClick={() => removeFile(i)} title="Remove"><Icon name="close" size={11} /></button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
         <div className="input-compose">
           {mentionOpen && mentionMatches.length > 0 && (
             <div className="mention-dropdown" role="listbox">
@@ -602,7 +550,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <button
             className="attach-btn"
             onClick={() => fileInputRef.current?.click()}
-            disabled={streaming || isLoading}
+            disabled={streaming || uploadingDocs}
             title="Attach file (PDF, CSV, TXT, image)"
           >
             <Icon name="attach" size={17} />
@@ -693,13 +641,6 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           <span className="input-hint-inline desktop-only">Enter to send · Shift+Enter for newline</span>
         </div>
       </div>
-
-      {pdfPreview && (
-        <div className="lightbox-backdrop" onClick={() => setPdfPreview(null)}>
-          <img src={pdfPreview} alt="PDF preview" className="lightbox-img" />
-          <button className="lightbox-close" onClick={() => setPdfPreview(null)} aria-label="Close"><Icon name="close" /></button>
-        </div>
-      )}
     </div>
   );
 });
