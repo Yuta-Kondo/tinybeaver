@@ -8,6 +8,7 @@ import { fileIcon, ATTACHMENT_THUMB_PX } from "../lib/attachments";
 import { renderPdfThumbnail } from "../lib/pdfThumb";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 import { ChatSessionSkeleton, Spinner, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
+import SelectionToolbar from "./SelectionToolbar";
 
 interface PendingFile extends AttachedFile {
   key: string;
@@ -537,6 +538,8 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         )}
         <div ref={bottomRef} />
       </div>
+
+      <SelectionToolbar containerRef={scrollRef} />
 
       {showScrollBtn && (
         <button className="scroll-bottom-btn" onClick={snapToBottom} title="Jump to latest" aria-label="Jump to latest">

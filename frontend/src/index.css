@@ -1304,6 +1304,33 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .msg-action-btn--delete:hover { background: rgba(248,113,113,0.1); color: #f87171; border-color: rgba(248,113,113,0.3); }
 .msg-action-btn--on { background: var(--em-glow); border-color: var(--em-border); color: var(--t1); }
 
+/* Floating copy button shown when text is selected inside the chat. */
+.selection-toolbar {
+  position: fixed;
+  z-index: 60;
+  animation: fade-in 0.12s var(--ease) both;
+}
+.selection-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid var(--gb2);
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  color: var(--t1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  transition: background 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.selection-toolbar-btn:hover { background: rgba(255, 255, 255, 0.1); }
+.selection-toolbar-btn:active { transform: scale(0.94); }
+
 .stopped-label {
   display: inline-flex;
   align-items: center;
