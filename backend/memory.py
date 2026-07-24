@@ -771,7 +771,7 @@ def _fts_query(query: str) -> str:
         "she", "too", "use", "what", "when", "where", "which", "while", "with",
         "from", "this", "that", "have", "been", "were", "they", "them", "then",
         "than", "into", "about", "would", "could", "should", "please", "explain",
-        "tell", "does", "doing",
+        "tell", "does", "doing", "lets", "chapter", "question",
     }
     keep = [t for t in tokens if t.lower() not in stop]
     if not keep:
@@ -780,16 +780,93 @@ def _fts_query(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in keep[:24])
 
 
+def _section_refs(query: str) -> list[str]:
+    """Extract textbook section/exercise numbers like 5.5, 5.5.2, Exercise 5.5."""
+    import re
+    refs = re.findall(r"\b\d+\.\d+(?:\.\d+)*\b", query or "")
+    # Dedupe, keep order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in refs:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
 def search_document_chunks(
     session_id: str,
     query: str,
     limit: int = 16,
 ) -> list[dict]:
-    """Return the most relevant document passages for a query via FTS5.
+    """Return the most relevant document passages for a query.
 
-    Falls back to simple token scoring if FTS isn't available yet (old DB).
+    Textbook queries like "Exercise 5.5" fail plain FTS because '.' is a token
+    separator — so we preferentially match literal section/exercise numbers,
+    then fill remaining slots with FTS / lexical hits.
     """
     conn = _get_conn()
+    scored: dict[int, tuple[float, dict]] = {}
+
+    def _add(rows, base_score: float, literal: str | None = None) -> None:
+        for i, r in enumerate(rows):
+            cid = int(r["id"])
+            bonus = 0.0
+            text = r["text"] or ""
+            if literal and literal in text:
+                # Prefer chunks that look like the exercise heading itself.
+                head = text[:240].lower()
+                if f"exercise {literal}" in head or f"exercises {literal}" in head:
+                    bonus = 50.0
+                elif literal in head:
+                    bonus = 20.0
+                else:
+                    bonus = 5.0
+            score = base_score - i + bonus
+            item = {
+                "doc_id": r["doc_id"],
+                "doc_name": r["doc_name"],
+                "chunk_index": r["chunk_index"],
+                "text": text,
+                "score": round(score, 3),
+            }
+            prev = scored.get(cid)
+            if not prev or score > prev[0]:
+                scored[cid] = (score, item)
+
+    # 1) Literal section/exercise number match (critical for "5.5", "3.2.1", …).
+    for ref in _section_refs(query):
+        try:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name
+                FROM   session_document_chunks c
+                JOIN   session_documents d ON d.id = c.doc_id
+                WHERE  c.session_id = ?
+                  AND  d.status = 'ready'
+                  AND  c.text LIKE ?
+                ORDER  BY
+                  CASE
+                    WHEN c.text LIKE ? THEN 0
+                    WHEN c.text LIKE ? THEN 1
+                    ELSE 2
+                  END,
+                  c.chunk_index
+                LIMIT  ?
+                """,
+                (
+                    session_id,
+                    f"%{ref}%",
+                    f"%Exercise {ref}%",
+                    f"%{ref}%",
+                    limit,
+                ),
+            ).fetchall()
+            _add(rows, base_score=100.0, literal=ref)
+        except sqlite3.OperationalError:
+            pass
+
+    # 2) FTS for the remaining topical words.
     fts_q = _fts_query(query)
     if fts_q:
         try:
@@ -801,52 +878,57 @@ def search_document_chunks(
                 JOIN   session_document_chunks c ON c.id = session_document_chunks_fts.rowid
                 JOIN   session_documents d ON d.id = c.doc_id
                 WHERE  c.session_id = ?
+                  AND  d.status = 'ready'
                   AND  session_document_chunks_fts MATCH ?
                 ORDER  BY rank
                 LIMIT  ?
                 """,
                 (session_id, fts_q, limit),
             ).fetchall()
-            if rows:
-                return [{
-                    "doc_id": r["doc_id"],
-                    "doc_name": r["doc_name"],
-                    "chunk_index": r["chunk_index"],
-                    "text": r["text"],
-                    "score": round(-float(r["rank"]), 3),  # bm25: lower is better
-                } for r in rows]
+            # bm25: lower is better → invert into a modest score band
+            for i, r in enumerate(rows):
+                try:
+                    rank = float(r["rank"])
+                except (TypeError, ValueError, KeyError):
+                    rank = float(i)
+                _add([r], base_score=10.0 - rank)
         except sqlite3.OperationalError:
-            pass  # FTS table missing or bad query → lexical fallback below
+            pass
 
-    # Lexical fallback: score chunks by token hit count (no extra memory).
+    if scored:
+        return [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
+
+    # 3) Lexical fallback: score chunks by token hit count (no extra memory).
     import re
     tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query or "")]
-    if not tokens:
+    refs = _section_refs(query)
+    if not tokens and not refs:
         return []
     rows = conn.execute(
         """
         SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name
         FROM   session_document_chunks c
         JOIN   session_documents d ON d.id = c.doc_id
-        WHERE  c.session_id = ?
+        WHERE  c.session_id = ? AND d.status = 'ready'
         """,
         (session_id,),
     ).fetchall()
-    scored: list[tuple[int, dict]] = []
     for r in rows:
         low = (r["text"] or "").lower()
         hits = sum(low.count(t) for t in tokens)
+        for ref in refs:
+            if ref in (r["text"] or ""):
+                hits += 10
         if hits <= 0:
             continue
-        scored.append((hits, {
+        scored[int(r["id"])] = (float(hits), {
             "doc_id": r["doc_id"],
             "doc_name": r["doc_name"],
             "chunk_index": r["chunk_index"],
             "text": r["text"],
             "score": hits,
-        }))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [item for _, item in scored[:limit]]
+        })
+    return [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
 
 
 # ---------------------------------------------------------------------------
