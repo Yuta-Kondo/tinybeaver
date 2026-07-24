@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+from collections.abc import Callable
 from pathlib import PurePath
 
 from .models import FILE_EXTRACTION_MODEL, calc_cost
@@ -45,6 +46,15 @@ Rules:
 - Do NOT summarize, skip exercises, or add commentary.
 - Output ONLY the page content.
 """
+
+# Pages with at least this much native text skip Flash OCR (textbooks with a
+# real text layer). Sparse/scanned pages still get per-page Flash OCR.
+_MIN_NATIVE_CHARS = 120
+# Parallel Flash OCR workers for sparse pages (keep modest on small VPS).
+_OCR_WORKERS = max(1, min(6, int(os.getenv("PDF_OCR_WORKERS", "4"))))
+# Set PDF_OCR_ALL_PAGES=1 to force Flash on every page (slow/expensive).
+_OCR_ALL_PAGES = os.getenv("PDF_OCR_ALL_PAGES", "").strip() in ("1", "true", "yes")
+
 
 _EXTRACT_PROMPT = """\
 You are extracting the full content of a file attachment for a personal AI assistant.
@@ -187,23 +197,29 @@ def _pdf_page_slice(data: bytes, start: int, end: int) -> bytes:
 
 
 def _gemini_ocr_page(
-    page_pdf: bytes, filename: str, page: int, n_pages: int, retries: int = 3
+    page_pdf: bytes,
+    filename: str,
+    page: int,
+    n_pages: int,
+    client=None,
+    retries: int = 3,
 ) -> tuple[str, float]:
     """OCR one PDF page with Gemini 3.5 Flash. Retries transient 503s."""
     import time
     from google import genai as google_genai
     from google.genai import types as gtypes
 
-    api_key = os.getenv("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("GOOGLE_API_KEY not configured (required for file reading)")
+    if client is None:
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY not configured (required for file reading)")
+        client = google_genai.Client(api_key=api_key)
 
     prompt = _PAGE_OCR_PROMPT.format(filename=filename, page=page, n_pages=n_pages)
     parts = [
         gtypes.Part.from_text(text=prompt),
         gtypes.Part.from_bytes(data=page_pdf, mime_type="application/pdf"),
     ]
-    client = google_genai.Client(api_key=api_key)
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
@@ -232,12 +248,17 @@ def _gemini_ocr_page(
     raise last_err or RuntimeError("Gemini page OCR failed")
 
 
-def _extract_pdf(data: bytes, filename: str) -> tuple[str, float]:
-    """OCR every page with Gemini 3.5 Flash (one page per call).
+def _extract_pdf(
+    data: bytes,
+    filename: str,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> tuple[str, float]:
+    """Extract a PDF fast: native text for rich pages, parallel Flash OCR for sparse ones.
 
-    Native pypdf text is only used as a fallback when a single page's OCR fails,
-    so textbooks keep exercises/math that text-layer extract often misses.
+    Set PDF_OCR_ALL_PAGES=1 to force Flash on every page (much slower).
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     try:
         native_pages, n_pages = _native_pdf_pages(data)
     except Exception as exc:
@@ -246,38 +267,80 @@ def _extract_pdf(data: bytes, filename: str) -> tuple[str, float]:
         try:
             from pypdf import PdfReader
             n_pages = len(PdfReader(io.BytesIO(data)).pages)
+            native_pages = [""] * n_pages
         except Exception:
             text, cost = _gemini_extract(data, "application/pdf", filename, "PDF")
             return text[:_MAX_LLM_OUTPUT_CHARS], cost
 
     if n_pages == 0:
         raise ValueError("PDF has no pages")
+    if len(native_pages) < n_pages:
+        native_pages = list(native_pages) + [""] * (n_pages - len(native_pages))
+
+    # Decide which pages need Flash OCR.
+    ocr_indices: list[int] = []
+    page_text: list[str | None] = [None] * n_pages
+    for i, native in enumerate(native_pages):
+        if _OCR_ALL_PAGES or len(native) < _MIN_NATIVE_CHARS:
+            ocr_indices.append(i)
+        else:
+            page_text[i] = native
 
     _log.info(
-        "OCR-ing %s with %s — %d pages (one Flash call each)",
-        filename, FILE_EXTRACTION_MODEL, n_pages,
+        "Extracting %s: %d pages — %d native, %d Flash OCR (%s, workers=%d%s)",
+        filename, n_pages, n_pages - len(ocr_indices), len(ocr_indices),
+        FILE_EXTRACTION_MODEL, _OCR_WORKERS,
+        ", ALL PAGES" if _OCR_ALL_PAGES else "",
     )
+    if on_progress:
+        on_progress(0, n_pages, f"Extracting… 0/{n_pages} pages")
+
+    total_cost = 0.0
+    if ocr_indices:
+        from google import genai as google_genai
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY not configured (required for file reading)")
+        client = google_genai.Client(api_key=api_key)
+
+        def _one(i: int) -> tuple[int, str, float]:
+            page_no = i + 1
+            try:
+                page_pdf = _pdf_page_slice(data, i, i + 1)
+                text, cost = _gemini_ocr_page(
+                    page_pdf, filename, page_no, n_pages, client=client
+                )
+                if not text.strip() and native_pages[i]:
+                    return i, native_pages[i], cost
+                return i, text, cost
+            except Exception as exc:
+                _log.warning("OCR page %d/%d failed: %s", page_no, n_pages, exc)
+                return i, native_pages[i], 0.0
+
+        done_ocr = 0
+        with ThreadPoolExecutor(max_workers=_OCR_WORKERS) as pool:
+            futures = {pool.submit(_one, i): i for i in ocr_indices}
+            for fut in as_completed(futures):
+                i, text, cost = fut.result()
+                page_text[i] = text
+                total_cost += cost
+                done_ocr += 1
+                if on_progress and (done_ocr % 5 == 0 or done_ocr == len(ocr_indices)):
+                    filled = sum(1 for t in page_text if t is not None)
+                    on_progress(
+                        filled, n_pages,
+                        f"OCR {done_ocr}/{len(ocr_indices)} sparse pages "
+                        f"({filled}/{n_pages} total)…",
+                    )
 
     parts: list[str] = []
-    total_cost = 0.0
-    for i in range(n_pages):
-        page_no = i + 1
-        try:
-            page_pdf = _pdf_page_slice(data, i, i + 1)
-            text, cost = _gemini_ocr_page(page_pdf, filename, page_no, n_pages)
-            total_cost += cost
-        except Exception as exc:
-            _log.warning("Gemini OCR page %d/%d failed: %s — using native fallback", page_no, n_pages, exc)
-            text = native_pages[i] if i < len(native_pages) else ""
-            cost = 0.0
+    for i, text in enumerate(page_text):
+        body = (text or "").strip()
+        if body:
+            parts.append(f"## Page {i + 1}\n{body}")
 
-        if text.strip():
-            parts.append(f"## Page {page_no}\n{text.strip()}")
-        elif i < len(native_pages) and native_pages[i]:
-            parts.append(f"## Page {page_no}\n{native_pages[i]}")
-
-        if page_no % 10 == 0 or page_no == n_pages:
-            _log.info("OCR progress %s: %d/%d pages ($%.4f so far)", filename, page_no, n_pages, total_cost)
+    if on_progress:
+        on_progress(n_pages, n_pages, f"Extracted {n_pages} pages")
 
     if not parts:
         raise ValueError("Could not extract text from PDF (all pages empty)")
@@ -288,11 +351,15 @@ def _max_bytes_for(ext: str) -> int:
     return _MAX_PDF_BYTES if ext == "pdf" else _MAX_INLINE_BYTES
 
 
-def extract_file_bytes(data: bytes, filename: str) -> tuple[str, float]:
+def extract_file_bytes(
+    data: bytes,
+    filename: str,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> tuple[str, float]:
     """Extract readable content from file bytes. Returns (text, cost_usd).
 
-    PDFs are OCR'd page-by-page with Gemini 3.5 Flash (no global char cap).
-    Other LLM paths are soft-capped.
+    PDFs: native text for rich pages; parallel Gemini 3.5 Flash OCR for sparse
+    pages (or every page if PDF_OCR_ALL_PAGES=1).
     """
     name = filename or "attachment"
     ext = PurePath(name).suffix.lstrip(".").lower()
@@ -303,7 +370,7 @@ def extract_file_bytes(data: bytes, filename: str) -> tuple[str, float]:
         raise ValueError(f"File too large ({mb} MB; max {cap} MB for .{ext or 'unknown'})")
 
     if ext == "pdf":
-        return _extract_pdf(data, name)
+        return _extract_pdf(data, name, on_progress=on_progress)
 
     if ext in _IMAGE_EXTS:
         text, cost = _gemini_extract(data, _mime_for_ext(ext), name, "image")
@@ -324,10 +391,8 @@ def extract_file_bytes(data: bytes, filename: str) -> tuple[str, float]:
         raw = data.decode("utf-8", errors="replace")
         if not raw.strip():
             raise ValueError("File is empty or not valid UTF-8 text")
-        # Plain text files: keep the raw content (no LLM rewrite / truncation).
         return raw, 0.0
 
-    # Unknown: UTF-8 text or image magic bytes.
     try:
         raw = data.decode("utf-8")
         if raw.strip() and sum(1 for c in raw[:2000] if c.isprintable() or c in "\n\r\t") / max(len(raw[:2000]), 1) > 0.85:

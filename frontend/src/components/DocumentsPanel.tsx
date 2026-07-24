@@ -130,8 +130,10 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
                     <div className="docs-item-info">
                       <span className="docs-item-name" title={d.name}>{d.name}</span>
                       <span className="docs-item-meta">
-                        {d.loading || d.status === "processing" || d.status === "pending"
-                          ? "Indexing…"
+                        {d.loading
+                          ? "Uploading…"
+                          : d.status === "processing" || d.status === "pending"
+                          ? (d.error || "Indexing…")
                           : d.status === "failed"
                           ? (d.error ? `Failed: ${d.error}` : "Failed")
                           : d.chars && d.chars > 0

@@ -92,21 +92,28 @@ def _ingest_document(doc_id: int) -> None:
     if not row:
         return
 
-    update_session_document(doc_id, status="processing", error="")
+    update_session_document(doc_id, status="processing", error="Starting extract…")
     path = resolve_path(row.get("storage_path"))
     if not path:
         update_session_document(doc_id, status="failed", error="Original file missing on disk")
         return
 
+    def on_progress(_done: int, _total: int, msg: str) -> None:
+        try:
+            update_session_document(doc_id, error=msg[:200])
+        except Exception:
+            pass
+
     try:
         data = path.read_bytes()
-        text, cost = extract_file_bytes(data, row["name"])
+        text, cost = extract_file_bytes(data, row["name"], on_progress=on_progress)
         if not (text or "").strip():
             update_session_document(
                 doc_id, status="failed", error="No content extracted from file", cost_usd=cost
             )
             return
 
+        update_session_document(doc_id, error="Chunking for search…")
         clear_document_chunks(doc_id)
         chunks = chunk_text(text)
         if chunks:
