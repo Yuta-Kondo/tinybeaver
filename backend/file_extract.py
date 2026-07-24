@@ -24,13 +24,27 @@ _EXCEL_EXTS = frozenset({"xlsx", "xlsm"})
 # Google Gemini inline limits: PDFs 50 MB; other inline types up to 100 MB per request.
 _MAX_PDF_BYTES = 50 * 1024 * 1024
 _MAX_INLINE_BYTES = 100 * 1024 * 1024
-# Soft cap only for the LLM-extraction path (Gemini can't dump unlimited output).
-# Native PDF text has no cap — textbooks stay whole and are retrieved by chunk.
+# Soft cap only for non-PDF LLM extraction. PDF pages are OCR'd one-by-one with
+# no global char cap so textbooks stay complete for retrieval.
 _MAX_LLM_OUTPUT_CHARS = 200_000
-# If native PDF yields fewer than this many chars per page on average, treat as scanned.
-_MIN_CHARS_PER_PAGE = 40
-# Gemini page-batch size for scanned PDFs.
-_SCANNED_PAGES_PER_BATCH = 8
+
+_PAGE_OCR_PROMPT = """\
+You are OCR-ing a single page of a PDF for a personal AI assistant that will later
+search this text to answer questions (exercises, theorems, proofs).
+
+Filename: {filename}
+Page: {page} of {n_pages}
+
+Rules:
+- Output clean Markdown with ALL readable content: body text, headings, captions,
+  footnotes, equations, exercise statements, and numbers.
+- Preserve structure (headings, lists, numbered exercises like "Exercise 5.5").
+- Math → LaTeX ($…$ / $$…$$) whenever possible.
+- Tables → Markdown tables.
+- Diagrams/figures → briefly describe and transcribe any labels/text in them.
+- Do NOT summarize, skip exercises, or add commentary.
+- Output ONLY the page content.
+"""
 
 _EXTRACT_PROMPT = """\
 You are extracting the full content of a file attachment for a personal AI assistant.
@@ -43,7 +57,6 @@ Rules:
 - Tables → Markdown tables with headers when possible.
 - Images/diagrams → transcribe visible text (OCR) and briefly note non-text visuals.
 - Spreadsheets → preserve every row and column; one section per sheet.
-- PDFs → extract all pages; preserve structure, headings, tables, and figure captions.
 - Do NOT add commentary, preamble, or "here is the content" — output ONLY the extracted material.
 - Prefer completeness over summarization."""
 
@@ -145,21 +158,19 @@ def _excel_to_tsv(data: bytes) -> str:
     return "\n\n".join(parts)
 
 
-def _native_pdf_text(data: bytes) -> tuple[str, int]:
-    """Extract text from a PDF with pypdf. Returns (text, page_count)."""
+def _native_pdf_pages(data: bytes) -> tuple[list[str], int]:
+    """Per-page native text via pypdf. Returns (pages_text_0indexed, page_count)."""
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
     pages: list[str] = []
-    for i, page in enumerate(reader.pages, start=1):
+    for page in reader.pages:
         try:
             raw = page.extract_text() or ""
         except Exception:
             raw = ""
-        text = raw.strip()
-        if text:
-            pages.append(f"## Page {i}\n{text}")
-    return "\n\n".join(pages), len(reader.pages)
+        pages.append(raw.strip())
+    return pages, len(reader.pages)
 
 
 def _pdf_page_slice(data: bytes, start: int, end: int) -> bytes:
@@ -175,50 +186,101 @@ def _pdf_page_slice(data: bytes, start: int, end: int) -> bytes:
     return buf.getvalue()
 
 
+def _gemini_ocr_page(
+    page_pdf: bytes, filename: str, page: int, n_pages: int, retries: int = 3
+) -> tuple[str, float]:
+    """OCR one PDF page with Gemini 3.5 Flash. Retries transient 503s."""
+    import time
+    from google import genai as google_genai
+    from google.genai import types as gtypes
+
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY not configured (required for file reading)")
+
+    prompt = _PAGE_OCR_PROMPT.format(filename=filename, page=page, n_pages=n_pages)
+    parts = [
+        gtypes.Part.from_text(text=prompt),
+        gtypes.Part.from_bytes(data=page_pdf, mime_type="application/pdf"),
+    ]
+    client = google_genai.Client(api_key=api_key)
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = client.models.generate_content(
+                model=FILE_EXTRACTION_MODEL,
+                contents=[gtypes.Content(role="user", parts=parts)],
+                config=gtypes.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8192,
+                ),
+            )
+            text = (resp.text or "").strip()
+            in_tok = out_tok = 0
+            usage = getattr(resp, "usage_metadata", None)
+            if usage:
+                in_tok = getattr(usage, "prompt_token_count", 0) or 0
+                out_tok = getattr(usage, "candidates_token_count", 0) or 0
+            return text, calc_cost(FILE_EXTRACTION_MODEL, in_tok, out_tok)
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            if attempt + 1 < retries and ("503" in msg or "unavailable" in msg or "high demand" in msg):
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    raise last_err or RuntimeError("Gemini page OCR failed")
+
+
 def _extract_pdf(data: bytes, filename: str) -> tuple[str, float]:
-    """Native text first; Gemini OCR in page batches if the PDF looks scanned."""
+    """OCR every page with Gemini 3.5 Flash (one page per call).
+
+    Native pypdf text is only used as a fallback when a single page's OCR fails,
+    so textbooks keep exercises/math that text-layer extract often misses.
+    """
     try:
-        native, n_pages = _native_pdf_text(data)
+        native_pages, n_pages = _native_pdf_pages(data)
     except Exception as exc:
-        _log.info("pypdf failed (%s); falling back to Gemini for whole PDF", exc)
-        text, cost = _gemini_extract(data, "application/pdf", filename, "PDF")
-        return text[:_MAX_LLM_OUTPUT_CHARS], cost
+        _log.warning("pypdf page count failed (%s)", exc)
+        native_pages, n_pages = [], 0
+        try:
+            from pypdf import PdfReader
+            n_pages = len(PdfReader(io.BytesIO(data)).pages)
+        except Exception:
+            text, cost = _gemini_extract(data, "application/pdf", filename, "PDF")
+            return text[:_MAX_LLM_OUTPUT_CHARS], cost
 
-    avg = (len(native) / n_pages) if n_pages else 0
-    if native.strip() and avg >= _MIN_CHARS_PER_PAGE:
-        # Text-based PDF — keep the full native extract (no LLM truncation).
-        return native, 0.0
-
-    # Scanned / image-heavy: OCR via Gemini in page-range batches so a textbook
-    # isn't crushed into a single truncated dump.
-    _log.info(
-        "PDF %s looks scanned (avg %.0f chars/page across %d pages) — Gemini OCR batches",
-        filename, avg, n_pages,
-    )
     if n_pages == 0:
-        text, cost = _gemini_extract(data, "application/pdf", filename, "PDF")
-        return text[:_MAX_LLM_OUTPUT_CHARS], cost
+        raise ValueError("PDF has no pages")
+
+    _log.info(
+        "OCR-ing %s with %s — %d pages (one Flash call each)",
+        filename, FILE_EXTRACTION_MODEL, n_pages,
+    )
 
     parts: list[str] = []
     total_cost = 0.0
-    for start in range(0, n_pages, _SCANNED_PAGES_PER_BATCH):
-        end = min(start + _SCANNED_PAGES_PER_BATCH, n_pages)
-        slice_bytes = _pdf_page_slice(data, start, end)
-        kind = f"PDF pages {start + 1}–{end} of {n_pages}"
+    for i in range(n_pages):
+        page_no = i + 1
         try:
-            text, cost = _gemini_extract(slice_bytes, "application/pdf", filename, kind)
+            page_pdf = _pdf_page_slice(data, i, i + 1)
+            text, cost = _gemini_ocr_page(page_pdf, filename, page_no, n_pages)
+            total_cost += cost
         except Exception as exc:
-            _log.warning("Gemini OCR batch %d–%d failed: %s", start + 1, end, exc)
-            continue
-        total_cost += cost
-        if text.strip():
-            parts.append(f"## Pages {start + 1}–{end}\n{text.strip()}")
+            _log.warning("Gemini OCR page %d/%d failed: %s — using native fallback", page_no, n_pages, exc)
+            text = native_pages[i] if i < len(native_pages) else ""
+            cost = 0.0
 
-    if not parts and native.strip():
-        # OCR failed entirely — keep whatever native text we got.
-        return native, total_cost
+        if text.strip():
+            parts.append(f"## Page {page_no}\n{text.strip()}")
+        elif i < len(native_pages) and native_pages[i]:
+            parts.append(f"## Page {page_no}\n{native_pages[i]}")
+
+        if page_no % 10 == 0 or page_no == n_pages:
+            _log.info("OCR progress %s: %d/%d pages ($%.4f so far)", filename, page_no, n_pages, total_cost)
+
     if not parts:
-        raise ValueError("Could not extract text from PDF (scanned pages returned empty)")
+        raise ValueError("Could not extract text from PDF (all pages empty)")
     return "\n\n".join(parts), total_cost
 
 
@@ -229,8 +291,8 @@ def _max_bytes_for(ext: str) -> int:
 def extract_file_bytes(data: bytes, filename: str) -> tuple[str, float]:
     """Extract readable content from file bytes. Returns (text, cost_usd).
 
-    For text PDFs the returned string is the full native extract (no char cap).
-    LLM paths are soft-capped so a single Gemini call can't blow memory.
+    PDFs are OCR'd page-by-page with Gemini 3.5 Flash (no global char cap).
+    Other LLM paths are soft-capped.
     """
     name = filename or "attachment"
     ext = PurePath(name).suffix.lstrip(".").lower()
