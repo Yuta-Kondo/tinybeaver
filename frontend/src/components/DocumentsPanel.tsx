@@ -10,6 +10,9 @@ export interface DocItem {
   name: string;
   kind: "image" | "pdf" | "file";
   size_kb?: number;
+  chars?: number;
+  status?: "processing" | "ready" | "failed" | "pending";
+  error?: string;
   loading?: boolean;
 }
 
@@ -29,7 +32,9 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const count = documents.length;
-  const uploading = documents.some((d) => d.loading);
+  const busy = documents.some(
+    (d) => d.loading || d.status === "processing" || d.status === "pending"
+  );
 
   const reposition = useCallback(() => {
     const btn = btnRef.current;
@@ -81,7 +86,7 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
         type="button"
         title="Documents in this chat"
       >
-        {uploading ? (
+        {busy ? (
           <BeaverLoader size="sm" />
         ) : (
           <svg viewBox="0 0 16 16" fill="none" width="13" height="13" aria-hidden="true">
@@ -125,14 +130,18 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
                     <div className="docs-item-info">
                       <span className="docs-item-name" title={d.name}>{d.name}</span>
                       <span className="docs-item-meta">
-                        {d.loading
-                          ? "Reading…"
+                        {d.loading || d.status === "processing" || d.status === "pending"
+                          ? "Indexing…"
+                          : d.status === "failed"
+                          ? (d.error ? `Failed: ${d.error}` : "Failed")
+                          : d.chars && d.chars > 0
+                          ? `${d.size_kb != null && d.size_kb > 0 ? `${d.size_kb} KB · ` : ""}${(d.chars / 1000).toFixed(0)}k chars`
                           : d.size_kb != null && d.size_kb > 0
                           ? `${d.size_kb} KB`
                           : d.kind}
                       </span>
                     </div>
-                    {d.loading ? (
+                    {d.loading || d.status === "processing" || d.status === "pending" ? (
                       <BeaverLoader size="sm" />
                     ) : (
                       <button

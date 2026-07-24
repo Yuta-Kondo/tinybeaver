@@ -151,6 +151,25 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     return () => { cancelled = true; };
   }, [sessionId]);
 
+  // Poll while any document is still indexing in the background.
+  const needsDocPoll = documents.some(
+    (d) => d.status === "processing" || d.status === "pending" || d.loading
+  );
+  useEffect(() => {
+    if (!sessionId || !needsDocPoll) return;
+    const t = window.setInterval(() => {
+      listSessionDocuments(sessionId)
+        .then((docs) => {
+          setDocuments((prev) => {
+            const loading = prev.filter((d) => d.loading);
+            return [...docs.map((d) => ({ ...d, key: `d${d.id}` })), ...loading];
+          });
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(t);
+  }, [sessionId, needsDocPoll]);
+
   useImperativeHandle(ref, () => ({
     focusInput: () => textareaRef.current?.focus(),
     setDraft: (text: string) => {
@@ -220,17 +239,15 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
-  // ── Document handling — uploads persist for the whole session ──
-  // Files go to /sessions/{id}/documents, are extracted server-side (Gemini),
-  // and are re-injected into the model's context on every turn of this chat.
+  // ── Document handling — originals stored on disk; extract/index async ──
 
   async function processFile(file: File) {
     const sid = onEnsureSession();
     const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setDocuments((d) => [...d, { key, name: file.name, kind: docKind(file.name), loading: true }]);
+    setDocuments((d) => [...d, { key, name: file.name, kind: docKind(file.name), loading: true, status: "processing" }]);
     try {
       const doc = await uploadSessionDocument(sid, file);
-      setDocuments((d) => d.map((it) => (it.key === key ? { ...doc, key } : it)));
+      setDocuments((d) => d.map((it) => (it.key === key ? { ...doc, key, loading: false } : it)));
     } catch (e: any) {
       setDocuments((d) => d.filter((it) => it.key !== key));
       alert(`Could not add "${file.name}": ${e.message}`);
@@ -386,6 +403,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   }
 
   const uploadingDocs = documents.some((d) => d.loading);
+  const indexingDocs = documents.some((d) => d.status === "processing" || d.status === "pending");
   const canSend = draft.trim().length > 0 && !streaming && !uploadingDocs;
 
   const lastAssistant = messages[messages.length - 1];
@@ -395,9 +413,11 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     (lastAssistant.streaming || !!lastAssistant.status);
   const inputWaitLabel = uploadingDocs
     ? WAIT_LABELS.fileRead
-    : streaming && !assistantBubbleWaiting
-      ? WAIT_LABELS.thinking
-      : null;
+    : indexingDocs
+      ? "Indexing document…"
+      : streaming && !assistantBubbleWaiting
+        ? WAIT_LABELS.thinking
+        : null;
 
   return (
     <div

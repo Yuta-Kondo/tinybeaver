@@ -24,7 +24,6 @@ from . import gmail as gmail_module
 from .classifier import classify
 from .llm import anthropic_client, finalize_stream, llm_json, sse, strip_code_fence
 from .memory import (
-    add_document_chunks,
     add_session_document,
     available_topics,
     create_topic,
@@ -323,7 +322,7 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
         return ""
 
     if total_chars <= _FULL_INJECT_CHARS:
-        docs = get_session_documents(session_id, include_text=True)
+        docs = get_session_documents(session_id, include_text=True, ready_only=True)
         parts: list[str] = []
         used = 0
         for d in docs:
@@ -339,7 +338,7 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
 
     # Large corpus → retrieve relevant passages for this turn's question.
     if not (query or "").strip():
-        docs = get_session_documents(session_id, include_text=True)
+        docs = get_session_documents(session_id, include_text=True, ready_only=True)
         heads = []
         for d in docs:
             text = (d.get("text") or "")[:1_500]
@@ -355,7 +354,7 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
 
     if not hits:
         # Chunks missing (legacy upload) — degrade to truncated heads, not full dump.
-        docs = get_session_documents(session_id, include_text=True)
+        docs = get_session_documents(session_id, include_text=True, ready_only=True)
         parts = []
         used = 0
         for d in docs:
@@ -1312,45 +1311,47 @@ def session_documents_list(session_id: str):
 
 @app.post("/sessions/{session_id}/documents")
 async def session_document_add(session_id: str, file: UploadFile = File(...)):
-    from .file_extract import chunk_text, extract_file_bytes
+    """Accept the original file to disk and return immediately.
+
+    Extraction + chunk indexing runs in a background thread so a textbook
+    upload can't OOM/timeout the HTTP request (ChatGPT/Claude style).
+    """
+    from pathlib import PurePath
+    from .doc_store import save_bytes, start_ingest
+    from .file_extract import _MAX_INLINE_BYTES, _MAX_PDF_BYTES
+    from .memory import update_session_document
 
     data = await file.read()
     name = file.filename or "attachment"
     size_kb = round(len(data) / 1024, 1)
-
-    try:
-        text, extract_cost = extract_file_bytes(data, name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read file: {e}")
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="No content extracted from file")
+    ext = PurePath(name).suffix.lstrip(".").lower()
+    limit = _MAX_PDF_BYTES if ext == "pdf" else _MAX_INLINE_BYTES
+    if len(data) > limit:
+        mb = len(data) // (1024 * 1024)
+        cap = limit // (1024 * 1024)
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({mb} MB; max {cap} MB for .{ext or 'unknown'})",
+        )
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
 
     doc = add_session_document(
         session_id=session_id,
         name=name,
         kind=_doc_kind(name),
-        text=text,
-        chars=len(text),
         size_kb=size_kb,
-        cost_usd=extract_cost,
+        status="processing",
     )
-
-    # Chunk for FTS retrieval (no ONNX embeddings — those OOM on the small VPS).
     try:
-        passages = chunk_text(text)
-        if passages:
-            add_document_chunks(session_id, doc["id"], passages)
-            doc["chunks"] = len(passages)
-        else:
-            doc["chunks"] = 0
+        rel = save_bytes(session_id, doc["id"], name, data)
+        update_session_document(doc["id"], storage_path=rel)
+        doc["storage_path"] = rel
     except Exception as e:
-        import traceback; traceback.print_exc()
-        doc["chunks"] = 0
-        doc["chunk_error"] = str(e)
+        delete_session_document(session_id, doc["id"])
+        raise HTTPException(status_code=500, detail=f"Could not store file: {e}")
 
+    start_ingest(doc["id"])
     return doc
 
 

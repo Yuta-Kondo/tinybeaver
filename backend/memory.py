@@ -108,15 +108,18 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 );
 
 CREATE TABLE IF NOT EXISTS session_documents (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    kind        TEXT NOT NULL DEFAULT 'file',
-    text        TEXT NOT NULL DEFAULT '',
-    chars       INTEGER NOT NULL DEFAULT 0,
-    size_kb     REAL NOT NULL DEFAULT 0,
-    cost_usd    REAL NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'file',
+    text         TEXT NOT NULL DEFAULT '',
+    chars        INTEGER NOT NULL DEFAULT 0,
+    size_kb      REAL NOT NULL DEFAULT 0,
+    cost_usd     REAL NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'ready',
+    error        TEXT NOT NULL DEFAULT '',
+    storage_path TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_documents_session
@@ -169,6 +172,9 @@ _MIGRATIONS = [
     "ALTER TABLE messages ADD COLUMN cost_usd REAL",
     "ALTER TABLE messages ADD COLUMN cost_breakdown TEXT",
     "ALTER TABLE messages ADD COLUMN attachments TEXT",
+    "ALTER TABLE session_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'",
+    "ALTER TABLE session_documents ADD COLUMN error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE session_documents ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -409,9 +415,24 @@ def search_sessions(query: str, limit: int = 20) -> list[dict]:
 
 
 def delete_session_db(session_id: str) -> bool:
+    # Collect file paths before CASCADE deletes the rows.
+    paths = [
+        r["storage_path"]
+        for r in _get_conn().execute(
+            "SELECT storage_path FROM session_documents WHERE session_id = ? AND storage_path != ''",
+            (session_id,),
+        ).fetchall()
+    ]
     conn = _get_conn()
     cur = conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
     conn.commit()
+    if cur.rowcount > 0:
+        try:
+            from .doc_store import delete_file
+            for p in paths:
+                delete_file(p)
+        except Exception:
+            pass
     return cur.rowcount > 0
 
 
@@ -580,6 +601,7 @@ def delete_message(session_id: str, msg_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def _document_row(r: sqlite3.Row, include_text: bool) -> dict:
+    keys = set(r.keys())
     out = {
         "id": r["id"],
         "name": r["name"],
@@ -587,6 +609,8 @@ def _document_row(r: sqlite3.Row, include_text: bool) -> dict:
         "chars": r["chars"],
         "size_kb": r["size_kb"],
         "cost_usd": r["cost_usd"],
+        "status": r["status"] if "status" in keys else "ready",
+        "error": r["error"] if "error" in keys else "",
         "created_at": r["created_at"],
     }
     if include_text:
@@ -594,53 +618,121 @@ def _document_row(r: sqlite3.Row, include_text: bool) -> dict:
     return out
 
 
+def _document_row_internal(r: sqlite3.Row) -> dict:
+    """Full row including storage_path — for ingest/delete only."""
+    out = _document_row(r, include_text=True)
+    keys = set(r.keys())
+    if "storage_path" in keys:
+        out["storage_path"] = r["storage_path"]
+    if "session_id" in keys:
+        out["session_id"] = r["session_id"]
+    return out
+
+
 def add_session_document(
     session_id: str,
     name: str,
     kind: str,
-    text: str,
-    chars: int,
     size_kb: float,
-    cost_usd: float,
+    *,
+    text: str = "",
+    chars: int = 0,
+    cost_usd: float = 0.0,
+    status: str = "processing",
+    storage_path: str = "",
+    error: str = "",
 ) -> dict:
     conn = _get_conn()
     # Ensure a session row exists so documents can be attached before the
     # first message (new chats create the session lazily).
     save_session(session_id)
     cur = conn.execute(
-        "INSERT INTO session_documents (session_id, name, kind, text, chars, size_kb, cost_usd) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (session_id, name, kind, text, chars, size_kb, cost_usd),
+        "INSERT INTO session_documents "
+        "(session_id, name, kind, text, chars, size_kb, cost_usd, status, error, storage_path) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (session_id, name, kind, text, chars, size_kb, cost_usd, status, error, storage_path),
     )
     conn.commit()
-    row = conn.execute(
-        "SELECT id, name, kind, chars, size_kb, cost_usd, created_at "
+    doc = get_session_document(int(cur.lastrowid))
+    assert doc is not None
+    # Public shape (no storage_path / text).
+    return {
+        "id": doc["id"],
+        "name": doc["name"],
+        "kind": doc["kind"],
+        "chars": doc["chars"],
+        "size_kb": doc["size_kb"],
+        "cost_usd": doc["cost_usd"],
+        "status": doc["status"],
+        "error": doc["error"],
+        "created_at": doc["created_at"],
+    }
+
+
+def get_session_document(doc_id: int) -> dict | None:
+    row = _get_conn().execute(
+        "SELECT id, session_id, name, kind, text, chars, size_kb, cost_usd, "
+        "status, error, storage_path, created_at "
         "FROM session_documents WHERE id = ?",
-        (cur.lastrowid,),
+        (doc_id,),
     ).fetchone()
-    return _document_row(row, include_text=False)
+    if not row:
+        return None
+    return _document_row_internal(row)
 
 
-def get_session_documents(session_id: str, include_text: bool = False) -> list[dict]:
-    cols = "id, name, kind, chars, size_kb, cost_usd, created_at"
+def update_session_document(doc_id: int, **fields) -> None:
+    allowed = {"text", "chars", "cost_usd", "status", "error", "storage_path", "size_kb", "name", "kind"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [doc_id]
+    conn = _get_conn()
+    conn.execute(f"UPDATE session_documents SET {sets} WHERE id = ?", vals)
+    conn.commit()
+
+
+def get_session_documents(session_id: str, include_text: bool = False, ready_only: bool = False) -> list[dict]:
+    cols = "id, name, kind, chars, size_kb, cost_usd, status, error, storage_path, created_at"
     if include_text:
         cols += ", text"
-    rows = _get_conn().execute(
-        f"SELECT {cols} FROM session_documents WHERE session_id = ? ORDER BY id",
-        (session_id,),
-    ).fetchall()
+    sql = f"SELECT {cols} FROM session_documents WHERE session_id = ?"
+    if ready_only:
+        sql += " AND status = 'ready'"
+    sql += " ORDER BY id"
+    rows = _get_conn().execute(sql, (session_id,)).fetchall()
     return [_document_row(r, include_text) for r in rows]
 
 
 def delete_session_document(session_id: str, doc_id: int) -> bool:
     conn = _get_conn()
+    row = conn.execute(
+        "SELECT storage_path FROM session_documents WHERE id = ? AND session_id = ?",
+        (doc_id, session_id),
+    ).fetchone()
+    if not row:
+        return False
+    storage_path = row["storage_path"]
     # Chunks cascade via FK ON DELETE CASCADE on doc_id.
     cur = conn.execute(
         "DELETE FROM session_documents WHERE id = ? AND session_id = ?",
         (doc_id, session_id),
     )
     conn.commit()
+    if cur.rowcount > 0:
+        try:
+            from .doc_store import delete_file
+            delete_file(storage_path)
+        except Exception:
+            pass
     return cur.rowcount > 0
+
+
+def clear_document_chunks(doc_id: int) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM session_document_chunks WHERE doc_id = ?", (doc_id,))
+    conn.commit()
 
 
 def add_document_chunks(session_id: str, doc_id: int, chunks: list[str]) -> int:
@@ -658,8 +750,10 @@ def add_document_chunks(session_id: str, doc_id: int, chunks: list[str]) -> int:
 
 
 def count_session_document_chars(session_id: str) -> int:
+    """Total extracted chars for ready documents only (used for full-inject vs retrieve)."""
     row = _get_conn().execute(
-        "SELECT COALESCE(SUM(chars), 0) FROM session_documents WHERE session_id = ?",
+        "SELECT COALESCE(SUM(chars), 0) FROM session_documents "
+        "WHERE session_id = ? AND status = 'ready'",
         (session_id,),
     ).fetchone()
     return int(row[0]) if row else 0

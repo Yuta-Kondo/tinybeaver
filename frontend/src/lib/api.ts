@@ -257,6 +257,8 @@ export interface SessionDocument {
   chars: number;
   size_kb: number;
   cost_usd: number;
+  status?: "processing" | "ready" | "failed" | "pending";
+  error?: string;
   created_at?: string;
 }
 
