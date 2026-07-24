@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS session_document_chunks (
     session_id  TEXT NOT NULL,
     chunk_index INTEGER NOT NULL,
     text        TEXT NOT NULL,
+    page        INTEGER,
     embedding   BLOB,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -175,6 +176,7 @@ _MIGRATIONS = [
     "ALTER TABLE session_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'",
     "ALTER TABLE session_documents ADD COLUMN error TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE session_documents ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE session_document_chunks ADD COLUMN page INTEGER",
 ]
 
 
@@ -740,18 +742,52 @@ def clear_document_chunks(doc_id: int) -> None:
     conn.commit()
 
 
-def add_document_chunks(session_id: str, doc_id: int, chunks: list[str]) -> int:
-    """Persist text passages for a document (FTS-indexed via triggers). Returns count."""
+def add_document_chunks(session_id: str, doc_id: int, chunks: list[dict]) -> int:
+    """Persist passages for a document (FTS via triggers).
+
+    Each chunk: ``{"text": str, "page": int|None, "embedding": bytes|None}``.
+    """
     if not chunks:
         return 0
     conn = _get_conn()
+    rows = []
+    for i, c in enumerate(chunks):
+        if isinstance(c, str):
+            text, page, emb = c, None, None
+        else:
+            text = c.get("text") or ""
+            page = c.get("page")
+            emb = c.get("embedding")
+        rows.append((doc_id, session_id, i, text, page, emb))
     conn.executemany(
-        "INSERT INTO session_document_chunks (doc_id, session_id, chunk_index, text) "
-        "VALUES (?, ?, ?, ?)",
-        [(doc_id, session_id, i, text) for i, text in enumerate(chunks)],
+        "INSERT INTO session_document_chunks "
+        "(doc_id, session_id, chunk_index, text, page, embedding) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
     )
     conn.commit()
     return len(chunks)
+
+
+def update_chunk_embeddings(pairs: list[tuple[int, bytes]]) -> None:
+    """Set embedding BLOBs for existing chunk ids: ``[(chunk_id, blob), ...]``."""
+    if not pairs:
+        return
+    conn = _get_conn()
+    conn.executemany(
+        "UPDATE session_document_chunks SET embedding = ? WHERE id = ?",
+        [(blob, cid) for cid, blob in pairs],
+    )
+    conn.commit()
+
+
+def list_document_chunks(doc_id: int) -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT id, chunk_index, text, page, embedding IS NOT NULL AS has_embedding "
+        "FROM session_document_chunks WHERE doc_id = ? ORDER BY chunk_index",
+        (doc_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def count_session_document_chars(session_id: str) -> int:
@@ -799,6 +835,22 @@ def _section_refs(query: str) -> list[str]:
     return out
 
 
+def _chunk_item(r) -> dict:
+    page = r["page"] if "page" in r.keys() else None
+    try:
+        page = int(page) if page is not None else None
+    except (TypeError, ValueError):
+        page = None
+    return {
+        "id": int(r["id"]),
+        "doc_id": r["doc_id"],
+        "doc_name": r["doc_name"],
+        "chunk_index": r["chunk_index"],
+        "page": page,
+        "text": r["text"] or "",
+    }
+
+
 def search_document_chunks(
     session_id: str,
     query: str,
@@ -806,20 +858,19 @@ def search_document_chunks(
 ) -> list[dict]:
     """Return the most relevant document passages for a query.
 
-    Textbook queries like "Exercise 5.5" fail plain FTS because '.' is a token
-    separator — so we preferentially match literal section/exercise numbers,
-    then fill remaining slots with FTS / lexical hits.
+    Hybrid: literal section/exercise refs → FTS → Gemini semantic cosine,
+    then expand ±1 neighbors so exercise bodies next to headings are included.
     """
     conn = _get_conn()
     scored: dict[int, tuple[float, dict]] = {}
 
     def _add(rows, base_score: float, literal: str | None = None) -> None:
         for i, r in enumerate(rows):
-            cid = int(r["id"])
+            item = _chunk_item(r)
+            cid = item["id"]
             bonus = 0.0
-            text = r["text"] or ""
+            text = item["text"]
             if literal and literal in text:
-                # Prefer chunks that look like the exercise heading itself.
                 head = text[:240].lower()
                 if f"exercise {literal}" in head or f"exercises {literal}" in head:
                     bonus = 50.0
@@ -828,13 +879,7 @@ def search_document_chunks(
                 else:
                     bonus = 5.0
             score = base_score - i + bonus
-            item = {
-                "doc_id": r["doc_id"],
-                "doc_name": r["doc_name"],
-                "chunk_index": r["chunk_index"],
-                "text": text,
-                "score": round(score, 3),
-            }
+            item["score"] = round(score, 3)
             prev = scored.get(cid)
             if not prev or score > prev[0]:
                 scored[cid] = (score, item)
@@ -844,7 +889,7 @@ def search_document_chunks(
         try:
             rows = conn.execute(
                 """
-                SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name
+                SELECT c.id, c.doc_id, c.chunk_index, c.text, c.page, d.name AS doc_name
                 FROM   session_document_chunks c
                 JOIN   session_documents d ON d.id = c.doc_id
                 WHERE  c.session_id = ?
@@ -877,7 +922,7 @@ def search_document_chunks(
         try:
             rows = conn.execute(
                 """
-                SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name,
+                SELECT c.id, c.doc_id, c.chunk_index, c.text, c.page, d.name AS doc_name,
                        bm25(session_document_chunks_fts) AS rank
                 FROM   session_document_chunks_fts
                 JOIN   session_document_chunks c ON c.id = session_document_chunks_fts.rowid
@@ -888,9 +933,8 @@ def search_document_chunks(
                 ORDER  BY rank
                 LIMIT  ?
                 """,
-                (session_id, fts_q, limit),
+                (session_id, fts_q, limit * 2),
             ).fetchall()
-            # bm25: lower is better → invert into a modest score band
             for i, r in enumerate(rows):
                 try:
                     rank = float(r["rank"])
@@ -900,40 +944,124 @@ def search_document_chunks(
         except sqlite3.OperationalError:
             pass
 
-    if scored:
-        return [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
+    # 3) Semantic: Gemini remote embeddings (skip if none stored / API unavailable).
+    try:
+        _semantic_add(conn, session_id, query, scored, limit=limit * 2)
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
-    # 3) Lexical fallback: score chunks by token hit count (no extra memory).
-    import re
-    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query or "")]
-    refs = _section_refs(query)
-    if not tokens and not refs:
-        return []
+    if not scored:
+        # 4) Lexical fallback: score chunks by token hit count.
+        import re
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query or "")]
+        refs = _section_refs(query)
+        if not tokens and not refs:
+            return []
+        rows = conn.execute(
+            """
+            SELECT c.id, c.doc_id, c.chunk_index, c.text, c.page, d.name AS doc_name
+            FROM   session_document_chunks c
+            JOIN   session_documents d ON d.id = c.doc_id
+            WHERE  c.session_id = ? AND d.status = 'ready'
+            """,
+            (session_id,),
+        ).fetchall()
+        for r in rows:
+            low = (r["text"] or "").lower()
+            hits = sum(low.count(t) for t in tokens)
+            for ref in refs:
+                if ref in (r["text"] or ""):
+                    hits += 10
+            if hits <= 0:
+                continue
+            item = _chunk_item(r)
+            item["score"] = hits
+            scored[item["id"]] = (float(hits), item)
+
+    ranked = [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
+    return _expand_neighbors(conn, ranked, limit=limit)
+
+
+def _semantic_add(
+    conn: sqlite3.Connection,
+    session_id: str,
+    query: str,
+    scored: dict[int, tuple[float, dict]],
+    limit: int = 32,
+) -> None:
     rows = conn.execute(
         """
-        SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name
+        SELECT c.id, c.doc_id, c.chunk_index, c.text, c.page, c.embedding,
+               d.name AS doc_name
         FROM   session_document_chunks c
         JOIN   session_documents d ON d.id = c.doc_id
-        WHERE  c.session_id = ? AND d.status = 'ready'
+        WHERE  c.session_id = ?
+          AND  d.status = 'ready'
+          AND  c.embedding IS NOT NULL
         """,
         (session_id,),
     ).fetchall()
+    if not rows:
+        return
+
+    from .doc_embeddings import cosine, decode_bytes, embed_query
+
+    qvec = embed_query(query)
+    sims: list[tuple[float, object]] = []
     for r in rows:
-        low = (r["text"] or "").lower()
-        hits = sum(low.count(t) for t in tokens)
-        for ref in refs:
-            if ref in (r["text"] or ""):
-                hits += 10
-        if hits <= 0:
+        try:
+            vec = decode_bytes(r["embedding"])
+        except Exception:
             continue
-        scored[int(r["id"])] = (float(hits), {
-            "doc_id": r["doc_id"],
-            "doc_name": r["doc_name"],
-            "chunk_index": r["chunk_index"],
-            "text": r["text"],
-            "score": hits,
-        })
-    return [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
+        sim = cosine(qvec, vec)
+        if sim > 0.25:
+            sims.append((sim, r))
+    sims.sort(key=lambda x: x[0], reverse=True)
+    for i, (sim, r) in enumerate(sims[:limit]):
+        item = _chunk_item(r)
+        # Semantic band ~0–50 so literals (100+) still win for Exercise 5.5.
+        score = 40.0 * sim + (5.0 - i * 0.05)
+        item["score"] = round(score, 3)
+        cid = item["id"]
+        prev = scored.get(cid)
+        if not prev or score > prev[0]:
+            scored[cid] = (score, item)
+
+
+def _expand_neighbors(
+    conn: sqlite3.Connection,
+    hits: list[dict],
+    limit: int = 16,
+) -> list[dict]:
+    """Include chunk_index ±1 for each hit so headings bring adjacent body text."""
+    if not hits:
+        return []
+    seen: set[int] = {h["id"] for h in hits}
+    out = list(hits)
+    for h in hits:
+        if len(out) >= limit:
+            break
+        for neighbor_idx in (h["chunk_index"] - 1, h["chunk_index"] + 1):
+            if neighbor_idx < 0 or len(out) >= limit:
+                continue
+            row = conn.execute(
+                """
+                SELECT c.id, c.doc_id, c.chunk_index, c.text, c.page, d.name AS doc_name
+                FROM   session_document_chunks c
+                JOIN   session_documents d ON d.id = c.doc_id
+                WHERE  c.doc_id = ? AND c.chunk_index = ?
+                """,
+                (h["doc_id"], neighbor_idx),
+            ).fetchone()
+            if not row or int(row["id"]) in seen:
+                continue
+            item = _chunk_item(row)
+            item["score"] = round(float(h.get("score") or 0) - 0.5, 3)
+            seen.add(item["id"])
+            out.append(item)
+    # Keep original rank order for primary hits; neighbors trail their parent.
+    return out[:limit]
 
 
 # ---------------------------------------------------------------------------

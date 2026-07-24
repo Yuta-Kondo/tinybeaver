@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 from collections.abc import Callable
 from pathlib import PurePath
 
@@ -441,50 +442,77 @@ def extract_file_bytes(
 
 _CHUNK_TARGET = 1_200   # ~chars per passage
 _CHUNK_OVERLAP = 150
+_PAGE_HDR = re.compile(r"^## Page (\d+)\b", re.MULTILINE)
 
 
-def chunk_text(text: str, target: int = _CHUNK_TARGET, overlap: int = _CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping passages, preferring paragraph / page breaks."""
+def chunk_text(text: str, target: int = _CHUNK_TARGET, overlap: int = _CHUNK_OVERLAP) -> list[dict]:
+    """Split text into overlapping passages with optional PDF page numbers.
+
+    Returns list of ``{"text": str, "page": int | None}``.
+    Page comes from ``## Page N`` markers written by PDF extract.
+    """
     text = (text or "").strip()
     if not text:
         return []
     if len(text) <= target:
-        return [text]
+        return [{"text": text, "page": _first_page(text)}]
 
-    # Prefer splitting on page/heading markers or blank lines.
     units = _split_units(text)
-    chunks: list[str] = []
+    raw: list[tuple[str, int | None]] = []
     buf = ""
+    buf_page: int | None = None
+    current_page: int | None = None
+
     for unit in units:
+        page_in_unit = _first_page(unit)
+        if page_in_unit is not None:
+            current_page = page_in_unit
+        unit_page = page_in_unit if page_in_unit is not None else current_page
+
         if not buf:
             buf = unit
+            buf_page = unit_page
             continue
         if len(buf) + 1 + len(unit) <= target:
             buf = f"{buf}\n\n{unit}" if unit else buf
+            if buf_page is None:
+                buf_page = unit_page
             continue
-        chunks.append(buf.strip())
-        # Overlap: keep the tail of the previous chunk.
+        raw.append((buf.strip(), buf_page))
         tail = buf[-overlap:].lstrip() if overlap and len(buf) > overlap else ""
         buf = f"{tail}\n\n{unit}".strip() if tail else unit
-    if buf.strip():
-        chunks.append(buf.strip())
+        buf_page = unit_page
 
-    # Hard-split any leftover mega-unit that refused to break.
-    out: list[str] = []
-    for c in chunks:
+    if buf.strip():
+        raw.append((buf.strip(), buf_page))
+
+    out: list[dict] = []
+    for c, page in raw:
         if len(c) <= target * 2:
-            out.append(c)
+            out.append({"text": c, "page": page if page is not None else _first_page(c)})
         else:
             for i in range(0, len(c), target - overlap):
-                piece = c[i:i + target].strip()
+                piece = c[i : i + target].strip()
                 if piece:
-                    out.append(piece)
+                    out.append({
+                        "text": piece,
+                        "page": page if page is not None else _first_page(piece),
+                    })
     return out
+
+
+def _first_page(text: str) -> int | None:
+    m = _PAGE_HDR.search(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 def _split_units(text: str) -> list[str]:
     """Break on ## headings / blank lines so chunks stay coherent."""
-    import re
     # Split keeping page/heading markers attached to the following body.
     parts = re.split(r"\n(?=## )|\n{2,}", text)
     return [p.strip() for p in parts if p and p.strip()]

@@ -288,6 +288,15 @@ export async function deleteSessionDocument(sessionId: string, docId: number): P
   if (!r.ok) throw new Error("Failed to delete document");
 }
 
+export async function reindexSessionDocument(sessionId: string, docId: number): Promise<SessionDocument> {
+  const r = await fetch(`/sessions/${sessionId}/documents/${docId}/reindex`, { method: "POST" });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: "Failed to reindex document" }));
+    throw new Error(typeof err.detail === "string" ? err.detail : "Failed to reindex document");
+  }
+  return r.json();
+}
+
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------

@@ -2089,6 +2089,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   text-overflow: ellipsis;
 }
 .docs-item-meta { font-size: 10.5px; color: var(--t3); }
+.docs-item-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.docs-item-reindex,
 .docs-item-remove {
   flex-shrink: 0;
   width: 22px;
@@ -2101,8 +2108,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--t3);
   border-radius: 6px;
   cursor: pointer;
+  font-size: 12px;
   transition: color 0.15s var(--ease), background 0.15s var(--ease);
 }
+.docs-item-reindex:hover { color: var(--t1); background: rgba(255, 255, 255, 0.06); }
 .docs-item-remove:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
 
 .mobile-header-actions { display: flex; align-items: center; gap: 8px; }

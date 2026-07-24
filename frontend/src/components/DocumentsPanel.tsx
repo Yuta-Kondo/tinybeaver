@@ -20,13 +20,14 @@ interface Props {
   documents: DocItem[];
   onAddClick: () => void;
   onRemove: (id: number) => void;
+  onReindex?: (id: number) => void;
   disabled?: boolean;
 }
 
 const MENU_W = 300;
 
 /** Top-bar control listing documents attached to the whole chat session. */
-export default function DocumentsPanel({ documents, onAddClick, onRemove, disabled }: Props) {
+export default function DocumentsPanel({ documents, onAddClick, onRemove, onReindex, disabled }: Props) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -146,17 +147,30 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
                     {d.loading ? (
                       <BeaverLoader size="sm" />
                     ) : (
-                      <button
-                        className="docs-item-remove"
-                        onClick={() => d.id != null && onRemove(d.id)}
-                        title={
-                          d.status === "processing" || d.status === "pending"
-                            ? "Stop & remove"
-                            : "Remove document"
-                        }
-                      >
-                        <Icon name="close" size={11} />
-                      </button>
+                      <div className="docs-item-actions">
+                        {onReindex && d.id != null && d.status === "ready" && (d.chars ?? 0) > 0 && (
+                          <button
+                            className="docs-item-reindex"
+                            onClick={() => onReindex(d.id!)}
+                            title="Reindex for better search"
+                            type="button"
+                          >
+                            ↻
+                          </button>
+                        )}
+                        <button
+                          className="docs-item-remove"
+                          onClick={() => d.id != null && onRemove(d.id)}
+                          type="button"
+                          title={
+                            d.status === "processing" || d.status === "pending"
+                              ? "Stop & remove"
+                              : "Remove document"
+                          }
+                        >
+                          <Icon name="close" size={11} />
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}

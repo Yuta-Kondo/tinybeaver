@@ -321,7 +321,7 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
 
     Small sessions: inject full document text.
     Large sessions (textbooks): retrieve the top relevant passages for `query`
-    via FTS (no ONNX embeddings — those OOM'd the 3.7GB VPS).
+    via hybrid FTS + Gemini embeddings (no local ONNX).
     """
     from .memory import count_session_document_chars
 
@@ -354,6 +354,13 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
                 heads.append(f"### {d['name']} (excerpt)\n{text}")
         return "\n\n".join(heads)
 
+    # Backfill Gemini embeddings for legacy uploads (async; this turn still uses FTS).
+    try:
+        from .doc_store import kick_missing_embeddings
+        kick_missing_embeddings(session_id)
+    except Exception:
+        pass
+
     try:
         hits = search_document_chunks(session_id, query, limit=_RETRIEVE_CHUNK_LIMIT)
     except Exception:
@@ -385,8 +392,9 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
 
     parts = [
         "The following passages were retrieved from the user's uploaded documents "
-        "as most relevant to their current message. Cite the source document when "
-        "using them. If something needed isn't here, say so — do not invent content."
+        "as most relevant to their current message. Cite the source document and "
+        "page number (e.g. name p.42) when using them. If something needed isn't "
+        "here, say so — do not invent content."
     ]
     used = 0
     for name, passages in by_doc.items():
@@ -397,7 +405,9 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
             if remaining <= 0:
                 break
             take = snippet[:remaining]
-            body_bits.append(take)
+            page = p.get("page")
+            label = f"[p.{page}] " if page else ""
+            body_bits.append(f"{label}{take}")
             used += len(take)
         if body_bits:
             parts.append(f"### {name}\n" + "\n\n---\n\n".join(body_bits))
@@ -422,7 +432,9 @@ def _build_system(context: str, summary: str, documents: str = "") -> list[dict]
                 "## Attached documents\n\n"
                 "The user uploaded the following document(s) to this conversation. "
                 "Treat them as authoritative context and refer to them when relevant "
-                "throughout the chat.\n\n" + documents
+                "throughout the chat. When quoting or answering from a passage, cite "
+                "the document name and page (e.g. textbook.pdf p.42) if a page is shown.\n\n"
+                + documents
             ),
             # Intentionally no cache_control: retrieved passages change per turn.
         })
@@ -1368,6 +1380,25 @@ def session_document_delete(session_id: str, doc_id: int):
     if not delete_session_document(session_id, doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
     return {"ok": True}
+
+
+@app.post("/sessions/{session_id}/documents/{doc_id}/reindex")
+def session_document_reindex(session_id: str, doc_id: int):
+    """Re-chunk + Gemini-embed an already-extracted document (no re-OCR)."""
+    from .doc_store import start_reindex
+    from .memory import get_session_document, update_session_document
+
+    doc = get_session_document(doc_id)
+    if not doc or doc.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not (doc.get("text") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="No extracted text — re-upload the file instead",
+        )
+    update_session_document(doc_id, status="processing", error="Reindexing…")
+    start_reindex(doc_id)
+    return get_session_document(doc_id) or doc
 
 
 # ---------------------------------------------------------------------------

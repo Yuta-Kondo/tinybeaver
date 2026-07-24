@@ -3,7 +3,7 @@ import MessageBubble from "./MessageBubble";
 import Icon from "./Icon";
 import type { Message } from "../hooks/useChat";
 import type { AttachedFile } from "../lib/api";
-import { deleteSessionDocument, fetchTopics, listSessionDocuments, uploadSessionDocument } from "../lib/api";
+import { deleteSessionDocument, fetchTopics, listSessionDocuments, reindexSessionDocument, uploadSessionDocument } from "../lib/api";
 import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 import { ChatSessionSkeleton, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 import SelectionToolbar from "./SelectionToolbar";
@@ -279,6 +279,19 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
     }
   }
 
+  async function reindexDocument(id: number) {
+    const sid = sessionId;
+    if (!sid) return;
+    try {
+      const doc = await reindexSessionDocument(sid, id);
+      setDocuments((d) =>
+        d.map((it) => (it.id === id ? { ...it, ...doc, key: it.key, loading: false } : it))
+      );
+    } catch (e: any) {
+      alert(`Could not reindex: ${e.message}`);
+    }
+  }
+
   // ── Paste ──────────────────────────────────────────
 
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -438,6 +451,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           documents={documents}
           onAddClick={() => fileInputRef.current?.click()}
           onRemove={removeDocument}
+          onReindex={reindexDocument}
           disabled={streaming}
         />
         <button
@@ -467,6 +481,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
           documents={documents}
           onAddClick={() => fileInputRef.current?.click()}
           onRemove={removeDocument}
+          onReindex={reindexDocument}
           disabled={streaming}
         />
         <button
