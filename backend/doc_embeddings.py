@@ -14,7 +14,7 @@ from typing import Callable
 _log = logging.getLogger(__name__)
 
 # Compact vectors keep SQLite BLOBs and cosine search cheap on the VPS.
-_MODEL = "text-embedding-004"
+_MODEL = "gemini-embedding-001"
 _DIM = 256
 _BATCH = 48  # stay well under API batch limits
 _MAX_CHARS = 6_000  # ~2k tokens; API truncates anyway
