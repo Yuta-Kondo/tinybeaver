@@ -143,13 +143,17 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, disabl
                           : d.kind}
                       </span>
                     </div>
-                    {d.loading || d.status === "processing" || d.status === "pending" ? (
+                    {d.loading ? (
                       <BeaverLoader size="sm" />
                     ) : (
                       <button
                         className="docs-item-remove"
                         onClick={() => d.id != null && onRemove(d.id)}
-                        title="Remove document"
+                        title={
+                          d.status === "processing" || d.status === "pending"
+                            ? "Stop & remove"
+                            : "Remove document"
+                        }
                       >
                         <Icon name="close" size={11} />
                       </button>

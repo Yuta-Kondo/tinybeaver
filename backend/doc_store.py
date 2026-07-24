@@ -18,6 +18,11 @@ DOCS_DIR = DB_PATH.parent / "documents"
 
 _ingest_lock = threading.Lock()
 _active_ingests: set[int] = set()
+_cancel_flags: dict[int, threading.Event] = {}
+
+
+class IngestCancelled(Exception):
+    """Raised when the user stops an in-flight document ingest."""
 
 
 def _safe_name(name: str) -> str:
@@ -62,12 +67,43 @@ def delete_file(storage_path: str | None) -> None:
         _log.warning("Could not delete document file %s: %s", p, e)
 
 
+def cancel_ingest(doc_id: int) -> None:
+    """Signal a running ingest to stop (also used when the doc is deleted)."""
+    with _ingest_lock:
+        ev = _cancel_flags.get(doc_id)
+    if ev:
+        ev.set()
+
+
+def is_cancelled(doc_id: int) -> bool:
+    with _ingest_lock:
+        ev = _cancel_flags.get(doc_id)
+    return bool(ev and ev.is_set())
+
+
+def reset_stuck_ingests() -> int:
+    """On startup: any 'processing' row has no live worker after a restart."""
+    from .memory import _get_conn, update_session_document
+
+    rows = _get_conn().execute(
+        "SELECT id FROM session_documents WHERE status IN ('processing', 'pending')"
+    ).fetchall()
+    for r in rows:
+        update_session_document(
+            r["id"],
+            status="failed",
+            error="Stopped — server restarted during indexing. Remove and re-upload.",
+        )
+    return len(rows)
+
+
 def start_ingest(doc_id: int) -> None:
     """Run extract → chunk → FTS in a daemon thread (one at a time per doc)."""
     with _ingest_lock:
         if doc_id in _active_ingests:
             return
         _active_ingests.add(doc_id)
+        _cancel_flags[doc_id] = threading.Event()
 
     def _run() -> None:
         try:
@@ -75,6 +111,7 @@ def start_ingest(doc_id: int) -> None:
         finally:
             with _ingest_lock:
                 _active_ingests.discard(doc_id)
+                _cancel_flags.pop(doc_id, None)
 
     threading.Thread(target=_run, name=f"doc-ingest-{doc_id}", daemon=True).start()
 
@@ -99,14 +136,24 @@ def _ingest_document(doc_id: int) -> None:
         return
 
     def on_progress(_done: int, _total: int, msg: str) -> None:
+        if is_cancelled(doc_id):
+            raise IngestCancelled()
         try:
             update_session_document(doc_id, error=msg[:200])
         except Exception:
             pass
 
+    def check_cancel() -> None:
+        if is_cancelled(doc_id):
+            raise IngestCancelled()
+
     try:
+        check_cancel()
         data = path.read_bytes()
-        text, cost = extract_file_bytes(data, row["name"], on_progress=on_progress)
+        text, cost = extract_file_bytes(
+            data, row["name"], on_progress=on_progress, should_cancel=lambda: is_cancelled(doc_id)
+        )
+        check_cancel()
         if not (text or "").strip():
             update_session_document(
                 doc_id, status="failed", error="No content extracted from file", cost_usd=cost
@@ -116,6 +163,7 @@ def _ingest_document(doc_id: int) -> None:
         update_session_document(doc_id, error="Chunking for search…")
         clear_document_chunks(doc_id)
         chunks = chunk_text(text)
+        check_cancel()
         if chunks:
             add_document_chunks(row["session_id"], doc_id, chunks)
 
@@ -131,6 +179,12 @@ def _ingest_document(doc_id: int) -> None:
             "Ingested doc %s (%s): %d chars, %d chunks, $%.4f",
             doc_id, row["name"], len(text), len(chunks), cost,
         )
+    except IngestCancelled:
+        _log.info("Ingest cancelled for doc %s", doc_id)
+        # Row may already be deleted; only update if it still exists.
+        if get_session_document(doc_id):
+            update_session_document(doc_id, status="failed", error="Stopped by user")
     except Exception as e:
         _log.exception("Ingest failed for doc %s", doc_id)
-        update_session_document(doc_id, status="failed", error=str(e)[:500])
+        if get_session_document(doc_id):
+            update_session_document(doc_id, status="failed", error=str(e)[:500])

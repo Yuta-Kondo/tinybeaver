@@ -706,6 +706,11 @@ def get_session_documents(session_id: str, include_text: bool = False, ready_onl
 
 
 def delete_session_document(session_id: str, doc_id: int) -> bool:
+    try:
+        from .doc_store import cancel_ingest
+        cancel_ingest(doc_id)
+    except Exception:
+        pass
     conn = _get_conn()
     row = conn.execute(
         "SELECT storage_path FROM session_documents WHERE id = ? AND session_id = ?",

@@ -83,6 +83,14 @@ from .providers import (
 async def lifespan(app: FastAPI):
     # Startup: touch DB to run migrations
     available_topics()
+    # Clear orphaned "processing" docs left by a previous crash/restart.
+    try:
+        from .doc_store import reset_stuck_ingests
+        n = reset_stuck_ingests()
+        if n:
+            print(f"Reset {n} stuck document ingest(s)")
+    except Exception as e:
+        print(f"Document ingest reset warning: {e}")
     # Start task scheduler
     try:
         from .scheduler import start_scheduler

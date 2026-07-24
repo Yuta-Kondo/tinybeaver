@@ -252,12 +252,16 @@ def _extract_pdf(
     data: bytes,
     filename: str,
     on_progress: Callable[[int, int, str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[str, float]:
     """Extract a PDF fast: native text for rich pages, parallel Flash OCR for sparse ones.
 
     Set PDF_OCR_ALL_PAGES=1 to force Flash on every page (much slower).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _cancelled() -> bool:
+        return bool(should_cancel and should_cancel())
 
     try:
         native_pages, n_pages = _native_pdf_pages(data)
@@ -277,6 +281,10 @@ def _extract_pdf(
     if len(native_pages) < n_pages:
         native_pages = list(native_pages) + [""] * (n_pages - len(native_pages))
 
+    if _cancelled():
+        from .doc_store import IngestCancelled
+        raise IngestCancelled()
+
     # Decide which pages need Flash OCR.
     ocr_indices: list[int] = []
     page_text: list[str | None] = [None] * n_pages
@@ -293,7 +301,12 @@ def _extract_pdf(
         ", ALL PAGES" if _OCR_ALL_PAGES else "",
     )
     if on_progress:
-        on_progress(0, n_pages, f"Extracting… 0/{n_pages} pages")
+        on_progress(
+            n_pages - len(ocr_indices),
+            n_pages,
+            f"Extracting… {n_pages - len(ocr_indices)}/{n_pages} pages native"
+            + (f", {len(ocr_indices)} need OCR" if ocr_indices else ""),
+        )
 
     total_cost = 0.0
     if ocr_indices:
@@ -304,6 +317,9 @@ def _extract_pdf(
         client = google_genai.Client(api_key=api_key)
 
         def _one(i: int) -> tuple[int, str, float]:
+            if _cancelled():
+                from .doc_store import IngestCancelled
+                raise IngestCancelled()
             page_no = i + 1
             try:
                 page_pdf = _pdf_page_slice(data, i, i + 1)
@@ -314,6 +330,9 @@ def _extract_pdf(
                     return i, native_pages[i], cost
                 return i, text, cost
             except Exception as exc:
+                from .doc_store import IngestCancelled
+                if isinstance(exc, IngestCancelled):
+                    raise
                 _log.warning("OCR page %d/%d failed: %s", page_no, n_pages, exc)
                 return i, native_pages[i], 0.0
 
@@ -321,6 +340,11 @@ def _extract_pdf(
         with ThreadPoolExecutor(max_workers=_OCR_WORKERS) as pool:
             futures = {pool.submit(_one, i): i for i in ocr_indices}
             for fut in as_completed(futures):
+                if _cancelled():
+                    for f in futures:
+                        f.cancel()
+                    from .doc_store import IngestCancelled
+                    raise IngestCancelled()
                 i, text, cost = fut.result()
                 page_text[i] = text
                 total_cost += cost
@@ -355,6 +379,7 @@ def extract_file_bytes(
     data: bytes,
     filename: str,
     on_progress: Callable[[int, int, str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[str, float]:
     """Extract readable content from file bytes. Returns (text, cost_usd).
 
@@ -370,7 +395,7 @@ def extract_file_bytes(
         raise ValueError(f"File too large ({mb} MB; max {cap} MB for .{ext or 'unknown'})")
 
     if ext == "pdf":
-        return _extract_pdf(data, name, on_progress=on_progress)
+        return _extract_pdf(data, name, on_progress=on_progress, should_cancel=should_cancel)
 
     if ext in _IMAGE_EXTS:
         text, cost = _gemini_extract(data, _mime_for_ext(ext), name, "image")
