@@ -11,6 +11,7 @@ export interface DocItem {
   kind: "image" | "pdf" | "file";
   size_kb?: number;
   chars?: number;
+  cost_usd?: number;
   status?: "processing" | "ready" | "failed" | "pending";
   error?: string;
   loading?: boolean;
@@ -25,6 +26,26 @@ interface Props {
 }
 
 const MENU_W = 300;
+
+function formatCost(usd: number): string {
+  if (usd < 0.00001) return "";
+  if (usd < 0.0001) return "<0.01¢";
+  if (usd < 0.01) return `${(usd * 100).toFixed(2)}¢`;
+  return `$${usd.toFixed(4)}`;
+}
+
+function docMeta(d: DocItem): string {
+  if (d.loading) return "Uploading…";
+  if (d.status === "processing" || d.status === "pending") return d.error || "Indexing…";
+  if (d.status === "failed") return d.error ? `Failed: ${d.error}` : "Failed";
+
+  const bits: string[] = [];
+  if (d.size_kb != null && d.size_kb > 0) bits.push(`${d.size_kb} KB`);
+  if (d.chars && d.chars > 0) bits.push(`${(d.chars / 1000).toFixed(0)}k chars`);
+  const cost = formatCost(d.cost_usd ?? 0);
+  if (cost) bits.push(`extract ${cost}`);
+  return bits.length > 0 ? bits.join(" · ") : d.kind;
+}
 
 /** Top-bar control listing documents attached to the whole chat session. */
 export default function DocumentsPanel({ documents, onAddClick, onRemove, onReindex, disabled }: Props) {
@@ -130,19 +151,7 @@ export default function DocumentsPanel({ documents, onAddClick, onRemove, onRein
                     <span className="docs-item-icon">{fileIcon(d.name)}</span>
                     <div className="docs-item-info">
                       <span className="docs-item-name" title={d.name}>{d.name}</span>
-                      <span className="docs-item-meta">
-                        {d.loading
-                          ? "Uploading…"
-                          : d.status === "processing" || d.status === "pending"
-                          ? (d.error || "Indexing…")
-                          : d.status === "failed"
-                          ? (d.error ? `Failed: ${d.error}` : "Failed")
-                          : d.chars && d.chars > 0
-                          ? `${d.size_kb != null && d.size_kb > 0 ? `${d.size_kb} KB · ` : ""}${(d.chars / 1000).toFixed(0)}k chars`
-                          : d.size_kb != null && d.size_kb > 0
-                          ? `${d.size_kb} KB`
-                          : d.kind}
-                      </span>
+                      <span className="docs-item-meta">{docMeta(d)}</span>
                     </div>
                     {d.loading ? (
                       <BeaverLoader size="sm" />
