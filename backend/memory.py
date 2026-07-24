@@ -136,6 +136,28 @@ CREATE TABLE IF NOT EXISTS session_document_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_session
     ON session_document_chunks(session_id, doc_id, chunk_index);
+
+-- Lexical retrieval for large docs (FTS). Avoids loading ONNX embeddings on
+-- small VPS boxes where fastembed OOMs during textbook ingest.
+CREATE VIRTUAL TABLE IF NOT EXISTS session_document_chunks_fts USING fts5(
+    text,
+    content='session_document_chunks',
+    content_rowid=id,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS session_document_chunks_ai AFTER INSERT ON session_document_chunks BEGIN
+    INSERT INTO session_document_chunks_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS session_document_chunks_ad AFTER DELETE ON session_document_chunks BEGIN
+    INSERT INTO session_document_chunks_fts(session_document_chunks_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS session_document_chunks_au AFTER UPDATE ON session_document_chunks BEGIN
+    INSERT INTO session_document_chunks_fts(session_document_chunks_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+    INSERT INTO session_document_chunks_fts(rowid, text) VALUES (new.id, new.text);
+END;
 """
 
 # Migration: add columns that may not exist in older DBs
@@ -162,8 +184,23 @@ def _get_conn() -> sqlite3.Connection:
                 c.executescript(_INIT_SQL)
                 _run_migrations(c)
                 _migrate_legacy(c)
+                _ensure_doc_chunks_fts(c)
                 _conn = c
     return _conn
+
+
+def _ensure_doc_chunks_fts(conn: sqlite3.Connection) -> None:
+    """Backfill FTS for any chunks inserted before the FTS table existed."""
+    try:
+        chunk_n = conn.execute("SELECT COUNT(*) FROM session_document_chunks").fetchone()[0]
+        fts_n = conn.execute("SELECT COUNT(*) FROM session_document_chunks_fts").fetchone()[0]
+        if chunk_n and fts_n == 0:
+            conn.execute(
+                "INSERT INTO session_document_chunks_fts(session_document_chunks_fts) VALUES('rebuild')"
+            )
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -606,15 +643,15 @@ def delete_session_document(session_id: str, doc_id: int) -> bool:
     return cur.rowcount > 0
 
 
-def add_document_chunks(session_id: str, doc_id: int, chunks: list[tuple[str, bytes | None]]) -> int:
-    """Persist (text, embedding_bytes) passages for a document. Returns count inserted."""
+def add_document_chunks(session_id: str, doc_id: int, chunks: list[str]) -> int:
+    """Persist text passages for a document (FTS-indexed via triggers). Returns count."""
     if not chunks:
         return 0
     conn = _get_conn()
     conn.executemany(
-        "INSERT INTO session_document_chunks (doc_id, session_id, chunk_index, text, embedding) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [(doc_id, session_id, i, text, emb) for i, (text, emb) in enumerate(chunks)],
+        "INSERT INTO session_document_chunks (doc_id, session_id, chunk_index, text) "
+        "VALUES (?, ?, ?, ?)",
+        [(doc_id, session_id, i, text) for i, text in enumerate(chunks)],
     )
     conn.commit()
     return len(chunks)
@@ -628,42 +665,91 @@ def count_session_document_chars(session_id: str) -> int:
     return int(row[0]) if row else 0
 
 
+def _fts_query(query: str) -> str:
+    """Turn a free-text question into a safe FTS5 OR-query of significant tokens."""
+    import re
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", query or "")
+    # Drop ultra-common stopwords that drown relevance on textbooks.
+    stop = {
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
+        "new", "now", "old", "see", "way", "who", "did", "get", "let", "say",
+        "she", "too", "use", "what", "when", "where", "which", "while", "with",
+        "from", "this", "that", "have", "been", "were", "they", "them", "then",
+        "than", "into", "about", "would", "could", "should", "please", "explain",
+        "tell", "does", "doing",
+    }
+    keep = [t for t in tokens if t.lower() not in stop]
+    if not keep:
+        keep = tokens[:8]
+    # Quote each token so FTS punctuation can't break the query.
+    return " OR ".join(f'"{t}"' for t in keep[:24])
+
+
 def search_document_chunks(
     session_id: str,
-    query_vec: list[float],
+    query: str,
     limit: int = 16,
-    min_score: float = 0.15,
 ) -> list[dict]:
-    """Return the most relevant document passages for a query embedding."""
-    from .embeddings import cosine, decode_bytes
+    """Return the most relevant document passages for a query via FTS5.
 
-    rows = _get_conn().execute(
+    Falls back to simple token scoring if FTS isn't available yet (old DB).
+    """
+    conn = _get_conn()
+    fts_q = _fts_query(query)
+    if fts_q:
+        try:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name,
+                       bm25(session_document_chunks_fts) AS rank
+                FROM   session_document_chunks_fts
+                JOIN   session_document_chunks c ON c.id = session_document_chunks_fts.rowid
+                JOIN   session_documents d ON d.id = c.doc_id
+                WHERE  c.session_id = ?
+                  AND  session_document_chunks_fts MATCH ?
+                ORDER  BY rank
+                LIMIT  ?
+                """,
+                (session_id, fts_q, limit),
+            ).fetchall()
+            if rows:
+                return [{
+                    "doc_id": r["doc_id"],
+                    "doc_name": r["doc_name"],
+                    "chunk_index": r["chunk_index"],
+                    "text": r["text"],
+                    "score": round(-float(r["rank"]), 3),  # bm25: lower is better
+                } for r in rows]
+        except sqlite3.OperationalError:
+            pass  # FTS table missing or bad query → lexical fallback below
+
+    # Lexical fallback: score chunks by token hit count (no extra memory).
+    import re
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query or "")]
+    if not tokens:
+        return []
+    rows = conn.execute(
         """
-        SELECT c.id, c.doc_id, c.chunk_index, c.text, c.embedding, d.name AS doc_name
+        SELECT c.id, c.doc_id, c.chunk_index, c.text, d.name AS doc_name
         FROM   session_document_chunks c
         JOIN   session_documents d ON d.id = c.doc_id
-        WHERE  c.session_id = ? AND c.embedding IS NOT NULL
+        WHERE  c.session_id = ?
         """,
         (session_id,),
     ).fetchall()
-    if not rows:
-        return []
-
-    scored: list[tuple[float, dict]] = []
+    scored: list[tuple[int, dict]] = []
     for r in rows:
-        try:
-            vec = decode_bytes(r["embedding"])
-        except Exception:
+        low = (r["text"] or "").lower()
+        hits = sum(low.count(t) for t in tokens)
+        if hits <= 0:
             continue
-        score = cosine(query_vec, vec)
-        if score < min_score:
-            continue
-        scored.append((score, {
+        scored.append((hits, {
             "doc_id": r["doc_id"],
             "doc_name": r["doc_name"],
             "chunk_index": r["chunk_index"],
             "text": r["text"],
-            "score": round(score, 3),
+            "score": hits,
         }))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [item for _, item in scored[:limit]]

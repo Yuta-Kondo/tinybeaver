@@ -272,8 +272,11 @@ export async function uploadSessionDocument(sessionId: string, file: File): Prom
   form.append("file", file);
   const r = await fetch(`/sessions/${sessionId}/documents`, { method: "POST", body: form });
   if (!r.ok) {
+    if (r.status === 502 || r.status === 504) {
+      throw new Error("Server timed out or ran out of memory while reading this file. Try again — large textbooks may take a minute.");
+    }
     const err = await r.json().catch(() => ({ detail: "Failed to upload document" }));
-    throw new Error(err.detail ?? "Failed to upload document");
+    throw new Error(typeof err.detail === "string" ? err.detail : "Failed to upload document");
   }
   return r.json();
 }

@@ -313,14 +313,17 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
     """Build the documents block for the system prompt.
 
     Small sessions: inject full document text.
-    Large sessions (textbooks): retrieve the top relevant passages for `query`.
+    Large sessions (textbooks): retrieve the top relevant passages for `query`
+    via FTS (no ONNX embeddings — those OOM'd the 3.7GB VPS).
     """
-    docs = get_session_documents(session_id, include_text=True)
-    if not docs:
+    from .memory import count_session_document_chars
+
+    total_chars = count_session_document_chars(session_id)
+    if total_chars == 0:
         return ""
 
-    total_chars = sum(int(d.get("chars") or 0) for d in docs)
     if total_chars <= _FULL_INJECT_CHARS:
+        docs = get_session_documents(session_id, include_text=True)
         parts: list[str] = []
         used = 0
         for d in docs:
@@ -336,8 +339,7 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
 
     # Large corpus → retrieve relevant passages for this turn's question.
     if not (query or "").strip():
-        # No query (e.g. continue mode): fall back to a short head of each doc
-        # so the model still knows what files are attached.
+        docs = get_session_documents(session_id, include_text=True)
         heads = []
         for d in docs:
             text = (d.get("text") or "")[:1_500]
@@ -346,15 +348,14 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
         return "\n\n".join(heads)
 
     try:
-        from .embeddings import embed
-        query_vec = embed(query)
-        hits = search_document_chunks(session_id, query_vec, limit=_RETRIEVE_CHUNK_LIMIT)
+        hits = search_document_chunks(session_id, query, limit=_RETRIEVE_CHUNK_LIMIT)
     except Exception:
         import traceback; traceback.print_exc()
         hits = []
 
     if not hits:
-        # Chunks missing (legacy upload before chunking) — degrade to truncated full text.
+        # Chunks missing (legacy upload) — degrade to truncated heads, not full dump.
+        docs = get_session_documents(session_id, include_text=True)
         parts = []
         used = 0
         for d in docs:
@@ -1312,7 +1313,6 @@ def session_documents_list(session_id: str):
 @app.post("/sessions/{session_id}/documents")
 async def session_document_add(session_id: str, file: UploadFile = File(...)):
     from .file_extract import chunk_text, extract_file_bytes
-    from .embeddings import embed_many, vec_to_bytes
 
     data = await file.read()
     name = file.filename or "attachment"
@@ -1338,19 +1338,15 @@ async def session_document_add(session_id: str, file: UploadFile = File(...)):
         cost_usd=extract_cost,
     )
 
-    # Chunk + embed so large docs (textbooks) can be retrieved per turn.
+    # Chunk for FTS retrieval (no ONNX embeddings — those OOM on the small VPS).
     try:
         passages = chunk_text(text)
         if passages:
-            vectors = embed_many(passages)
-            add_document_chunks(
-                session_id,
-                doc["id"],
-                [(p, vec_to_bytes(v)) for p, v in zip(passages, vectors)],
-            )
+            add_document_chunks(session_id, doc["id"], passages)
             doc["chunks"] = len(passages)
+        else:
+            doc["chunks"] = 0
     except Exception as e:
-        # Extraction already succeeded; retrieval just won't work until re-upload.
         import traceback; traceback.print_exc()
         doc["chunks"] = 0
         doc["chunk_error"] = str(e)
