@@ -24,6 +24,7 @@ from . import gmail as gmail_module
 from .classifier import classify
 from .llm import anthropic_client, finalize_stream, llm_json, sse, strip_code_fence
 from .memory import (
+    add_document_chunks,
     add_session_document,
     available_topics,
     create_topic,
@@ -43,6 +44,7 @@ from .memory import (
     save_message,
     save_session,
     save_task,
+    search_document_chunks,
     search_sessions,
     search_topics,
     toggle_task,
@@ -299,31 +301,98 @@ def _strip_maps(text: str) -> str:
     return _MAP_RE.sub("", text).strip()
 
 
-# Total characters of uploaded-document text injected into context per turn.
-# Keeps the prompt bounded when several large files are attached to a session.
-_MAX_SESSION_DOC_CONTEXT_CHARS = 120_000
+# Below this total char count across all session docs we inject the full text
+# (short notes / handouts). Above it we retrieve relevant passages instead —
+# NotebookLM-style, so textbooks aren't truncated into a useless 80k dump.
+_FULL_INJECT_CHARS = 40_000
+_RETRIEVE_CHUNK_LIMIT = 16
+_RETRIEVE_CONTEXT_CHARS = 48_000
 
 
-def _session_documents_context(session_id: str) -> str:
-    """Assemble the text of all documents attached to a session, bounded by a
-    total-size budget so many/large uploads can't blow up the context window."""
+def _session_documents_context(session_id: str, query: str = "") -> str:
+    """Build the documents block for the system prompt.
+
+    Small sessions: inject full document text.
+    Large sessions (textbooks): retrieve the top relevant passages for `query`.
+    """
     docs = get_session_documents(session_id, include_text=True)
     if not docs:
         return ""
-    parts: list[str] = []
+
+    total_chars = sum(int(d.get("chars") or 0) for d in docs)
+    if total_chars <= _FULL_INJECT_CHARS:
+        parts: list[str] = []
+        used = 0
+        for d in docs:
+            text = d.get("text") or ""
+            if not text.strip():
+                continue
+            remaining = _FULL_INJECT_CHARS - used
+            if remaining <= 0:
+                break
+            parts.append(f"### {d['name']}\n{text[:remaining]}")
+            used += min(len(text), remaining)
+        return "\n\n".join(parts)
+
+    # Large corpus → retrieve relevant passages for this turn's question.
+    if not (query or "").strip():
+        # No query (e.g. continue mode): fall back to a short head of each doc
+        # so the model still knows what files are attached.
+        heads = []
+        for d in docs:
+            text = (d.get("text") or "")[:1_500]
+            if text.strip():
+                heads.append(f"### {d['name']} (excerpt)\n{text}")
+        return "\n\n".join(heads)
+
+    try:
+        from .embeddings import embed
+        query_vec = embed(query)
+        hits = search_document_chunks(session_id, query_vec, limit=_RETRIEVE_CHUNK_LIMIT)
+    except Exception:
+        import traceback; traceback.print_exc()
+        hits = []
+
+    if not hits:
+        # Chunks missing (legacy upload before chunking) — degrade to truncated full text.
+        parts = []
+        used = 0
+        for d in docs:
+            text = d.get("text") or ""
+            if not text.strip():
+                continue
+            remaining = _RETRIEVE_CONTEXT_CHARS - used
+            if remaining <= 0:
+                parts.append(f"[Additional document \"{d['name']}\" omitted — re-upload to enable retrieval]")
+                break
+            note = "" if len(text) <= remaining else "\n[...truncated; re-upload this file to enable full retrieval...]"
+            parts.append(f"### {d['name']}\n{text[:remaining]}{note}")
+            used += min(len(text), remaining)
+        return "\n\n".join(parts)
+
+    # Group by document, preserve retrieval rank within each.
+    by_doc: dict[str, list[dict]] = {}
+    for h in hits:
+        by_doc.setdefault(h["doc_name"], []).append(h)
+
+    parts = [
+        "The following passages were retrieved from the user's uploaded documents "
+        "as most relevant to their current message. Cite the source document when "
+        "using them. If something needed isn't here, say so — do not invent content."
+    ]
     used = 0
-    for d in docs:
-        text = d.get("text") or ""
-        if not text.strip():
-            continue
-        remaining = _MAX_SESSION_DOC_CONTEXT_CHARS - used
-        if remaining <= 0:
-            parts.append(f"[Additional document \"{d['name']}\" omitted — context budget reached]")
-            break
-        truncated = text[:remaining]
-        note = "" if len(truncated) == len(text) else "\n[...document truncated to fit context...]"
-        parts.append(f"### {d['name']}\n{truncated}{note}")
-        used += len(truncated)
+    for name, passages in by_doc.items():
+        body_bits = []
+        for p in passages:
+            snippet = p["text"]
+            remaining = _RETRIEVE_CONTEXT_CHARS - used
+            if remaining <= 0:
+                break
+            take = snippet[:remaining]
+            body_bits.append(take)
+            used += len(take)
+        if body_bits:
+            parts.append(f"### {name}\n" + "\n\n---\n\n".join(body_bits))
     return "\n\n".join(parts)
 
 
@@ -347,7 +416,7 @@ def _build_system(context: str, summary: str, documents: str = "") -> list[dict]
                 "Treat them as authoritative context and refer to them when relevant "
                 "throughout the chat.\n\n" + documents
             ),
-            "cache_control": {"type": "ephemeral"},
+            # Intentionally no cache_control: retrieved passages change per turn.
         })
     return blocks
 
@@ -578,7 +647,7 @@ def chat_stream(req: ChatRequest):
         new_topic = None
         update_topics = []
         api_messages, summary = get_api_messages(session_id)
-        system = _build_system("", summary, _session_documents_context(session_id))
+        system = _build_system("", summary, _session_documents_context(session_id, req.message))
     elif req.private:
         # Private mode: no DB, no memory
         all_topics = []
@@ -606,7 +675,7 @@ def chat_stream(req: ChatRequest):
         update_topics = relevant_topics + ([new_topic] if new_topic else [])
         context = load_context(relevant_topics)
         api_messages, summary = get_api_messages(session_id)
-        system = _build_system(context, summary, _session_documents_context(session_id))
+        system = _build_system(context, summary, _session_documents_context(session_id, req.message))
 
     # Fetch URLs in message (parallel)
     urls = _extract_urls(req.message)
@@ -1242,7 +1311,8 @@ def session_documents_list(session_id: str):
 
 @app.post("/sessions/{session_id}/documents")
 async def session_document_add(session_id: str, file: UploadFile = File(...)):
-    from .file_extract import extract_file_bytes
+    from .file_extract import chunk_text, extract_file_bytes
+    from .embeddings import embed_many, vec_to_bytes
 
     data = await file.read()
     name = file.filename or "attachment"
@@ -1267,6 +1337,24 @@ async def session_document_add(session_id: str, file: UploadFile = File(...)):
         size_kb=size_kb,
         cost_usd=extract_cost,
     )
+
+    # Chunk + embed so large docs (textbooks) can be retrieved per turn.
+    try:
+        passages = chunk_text(text)
+        if passages:
+            vectors = embed_many(passages)
+            add_document_chunks(
+                session_id,
+                doc["id"],
+                [(p, vec_to_bytes(v)) for p, v in zip(passages, vectors)],
+            )
+            doc["chunks"] = len(passages)
+    except Exception as e:
+        # Extraction already succeeded; retrieval just won't work until re-upload.
+        import traceback; traceback.print_exc()
+        doc["chunks"] = 0
+        doc["chunk_error"] = str(e)
+
     return doc
 
 

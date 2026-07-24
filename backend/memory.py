@@ -121,6 +121,21 @@ CREATE TABLE IF NOT EXISTS session_documents (
 
 CREATE INDEX IF NOT EXISTS idx_session_documents_session
     ON session_documents(session_id, id);
+
+-- Passage-level chunks for retrieval (NotebookLM-style). Cascades via
+-- session_documents → sessions, and also via doc_id FK.
+CREATE TABLE IF NOT EXISTS session_document_chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id      INTEGER NOT NULL REFERENCES session_documents(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    embedding   BLOB,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_chunks_session
+    ON session_document_chunks(session_id, doc_id, chunk_index);
 """
 
 # Migration: add columns that may not exist in older DBs
@@ -582,12 +597,76 @@ def get_session_documents(session_id: str, include_text: bool = False) -> list[d
 
 def delete_session_document(session_id: str, doc_id: int) -> bool:
     conn = _get_conn()
+    # Chunks cascade via FK ON DELETE CASCADE on doc_id.
     cur = conn.execute(
         "DELETE FROM session_documents WHERE id = ? AND session_id = ?",
         (doc_id, session_id),
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def add_document_chunks(session_id: str, doc_id: int, chunks: list[tuple[str, bytes | None]]) -> int:
+    """Persist (text, embedding_bytes) passages for a document. Returns count inserted."""
+    if not chunks:
+        return 0
+    conn = _get_conn()
+    conn.executemany(
+        "INSERT INTO session_document_chunks (doc_id, session_id, chunk_index, text, embedding) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(doc_id, session_id, i, text, emb) for i, (text, emb) in enumerate(chunks)],
+    )
+    conn.commit()
+    return len(chunks)
+
+
+def count_session_document_chars(session_id: str) -> int:
+    row = _get_conn().execute(
+        "SELECT COALESCE(SUM(chars), 0) FROM session_documents WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def search_document_chunks(
+    session_id: str,
+    query_vec: list[float],
+    limit: int = 16,
+    min_score: float = 0.15,
+) -> list[dict]:
+    """Return the most relevant document passages for a query embedding."""
+    from .embeddings import cosine, decode_bytes
+
+    rows = _get_conn().execute(
+        """
+        SELECT c.id, c.doc_id, c.chunk_index, c.text, c.embedding, d.name AS doc_name
+        FROM   session_document_chunks c
+        JOIN   session_documents d ON d.id = c.doc_id
+        WHERE  c.session_id = ? AND c.embedding IS NOT NULL
+        """,
+        (session_id,),
+    ).fetchall()
+    if not rows:
+        return []
+
+    scored: list[tuple[float, dict]] = []
+    for r in rows:
+        try:
+            vec = decode_bytes(r["embedding"])
+        except Exception:
+            continue
+        score = cosine(query_vec, vec)
+        if score < min_score:
+            continue
+        scored.append((score, {
+            "doc_id": r["doc_id"],
+            "doc_name": r["doc_name"],
+            "chunk_index": r["chunk_index"],
+            "text": r["text"],
+            "score": round(score, 3),
+        }))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in scored[:limit]]
 
 
 # ---------------------------------------------------------------------------

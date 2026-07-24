@@ -31,8 +31,20 @@ def embed(text: str) -> list[float]:
     return vecs[0].tolist()
 
 
+def embed_many(texts: list[str]) -> list[list[float]]:
+    """Batch-embed texts (much faster than one-by-one for document chunking)."""
+    if not texts:
+        return []
+    model = _get_model()
+    return [v.tolist() for v in model.embed(texts)]
+
+
 def embed_bytes(text: str) -> bytes:
     vec = embed(text)
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+def vec_to_bytes(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
