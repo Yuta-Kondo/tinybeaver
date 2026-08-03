@@ -234,54 +234,37 @@ def _run_tavily_search(query: str) -> tuple[str, list[dict]]:
         return f"Search error: {e}", []
 
 
-_SEARCH_NEED_PROMPT = """\
-Does this user message need a live web search for current or recent information?
-Reply ONLY JSON: {{"needs_search": true/false, "query": "search query or empty"}}
-
-Needs search: news, prices, weather, recent events, current status, "latest", dates in 2025+.
-No search: personal questions about Yuta, coding help, timeless knowledge, opinions, memory topics.
-
-Message: {message}"""
-
-
 _MOA_SEARCH_NEED_PROMPT = """\
-You prepare web search for a multi-agent decision helper (Self-MoA).
+You prepare web search for a chat assistant (single model or Self-MoA).
 Return ONLY JSON: {{"queries": ["short search query", ...]}}
 
-Include 1–3 queries when the decision benefits from live/external facts: salaries, prices,
+Include 1–3 queries when the answer benefits from live/external facts: salaries, prices,
 visa/immigration rules, academic deadlines, company/product status, policies, rates,
-schedules, news, comparisons that change over time.
-Use empty queries [] when personal context, memory, or timeless reasoning is enough —
-do not search for pure preference or "what should I do" with no factual dependency.
+schedules, news, comparisons that change over time, "latest"/"current" lookups.
+Use empty queries [] when personal context, memory, coding help, or timeless reasoning is enough.
+Do not search for pure preference with no factual dependency.
 
 User message: {message}"""
 
 
-def _prefetch_web_search(message: str) -> tuple[str, list[dict], float]:
-    """Pre-run Tavily for non-Claude-tool paths. Returns (context_block, sources, cost_usd)."""
-    if not os.getenv("TAVILY_API_KEY"):
-        return "", [], 0.0
-    try:
-        text, cost = llm_json(
-            _SEARCH_NEED_PROMPT.format(message=message[:1500]),
-            model=UTILITY_MODEL,
-            max_tokens=80,
-        )
-        data = json.loads(strip_code_fence(text))
-        if not data.get("needs_search"):
-            return "", [], cost
-        query = (data.get("query") or message[:200]).strip()
-        if not query:
-            return "", [], cost
-        result_text, sources = _run_tavily_search(query)
-        block = f"[Web search results for: {query}]\n{result_text}\n[End of web search]"
-        return block, sources, cost
-    except Exception:
-        return "", [], 0.0
+def _inject_search_into_messages(messages: list, search_block: str) -> list:
+    """Prepend a web-search text block onto the last user message."""
+    if not search_block or not messages:
+        return messages
+    last = messages[-1]
+    raw_content = last.get("content")
+    if isinstance(raw_content, list):
+        content = [{"type": "text", "text": search_block}] + list(raw_content)
+    else:
+        content = [
+            {"type": "text", "text": search_block},
+            {"type": "text", "text": str(raw_content or "")},
+        ]
+    return messages[:-1] + [{"role": "user", "content": content}]
 
 
 def _moa_search_queries(message: str) -> tuple[list[str], float]:
-    """Decide 0–3 web queries for Self-MoA. Returns (queries, classifier_cost)."""
+    """Decide 0–3 web queries. Returns (queries, classifier_cost)."""
     if not os.getenv("TAVILY_API_KEY"):
         return [], 0.0
     try:
@@ -328,15 +311,6 @@ def _run_tavily_searches(queries: list[str]) -> tuple[str, list[dict]]:
         )
         blocks.append(f"[Web search results for: {query}]\n{result_text}\n[End of web search]")
     return "\n\n".join(blocks), sources
-
-
-def _prefetch_web_search_for_moa(message: str) -> tuple[str, list[dict], float]:
-    """Decision-aware prefetch for Self-MoA (non-streaming helper). Returns (block, sources, cost)."""
-    queries, cost = _moa_search_queries(message)
-    if not queries:
-        return "", [], cost
-    block, sources = _run_tavily_searches(queries)
-    return block, sources, cost
 
 
 def _reindex_topic_embedding(slug: str, content: str, description: str = "") -> None:
@@ -797,23 +771,10 @@ def chat_stream(req: ChatRequest):
     if is_continue and (_MODEL.startswith("gemini") or _MODEL.startswith("glm")):
         _MODEL = DEFAULT_MODEL  # continuation runs on Claude
 
-    uses_native_tools = (
-        not req.multi_agent
-        and not _MODEL.startswith("gemini")
-        and not _MODEL.startswith("glm")
-    )
-    prefetch_block = ""
+    # Claude uses native web_search tools mid-turn. GLM / Gemini / Self-MoA
+    # prefetch inside their generators (with a visible "searching" SSE event).
     prefetch_sources: list[dict] = []
     prefetch_cost = 0.0
-    # Self-MoA runs its own decision-aware search inside generate_moa (with SSE).
-    if (
-        not req.multi_agent
-        and not uses_native_tools
-        and not req.private
-        and not is_continue
-        and os.getenv("TAVILY_API_KEY")
-    ):
-        prefetch_block, prefetch_sources, prefetch_cost = _prefetch_web_search(req.message)
 
     user_content: list[dict] = []
     for data_url in req.images:
@@ -827,11 +788,6 @@ def chat_stream(req: ChatRequest):
         user_content.append({
             "type": "text",
             "text": f"[Fetched URL content]\n{url_context}\n[End of fetched content]",
-        })
-    if prefetch_block:
-        user_content.append({
-            "type": "text",
-            "text": prefetch_block,
         })
     for f in req.files:
         user_content.append({
@@ -1072,13 +1028,23 @@ def chat_stream(req: ChatRequest):
 
     def generate_gemini():
         """Streaming generator for Gemini models."""
+        nonlocal prefetch_cost, prefetch_sources
         full_text = ""
         in_tokens = 0
         out_tokens = 0
         yield _emit_start()
+        stream_messages = messages_for_api
+        if not req.private and not is_continue and os.getenv("TAVILY_API_KEY"):
+            queries, q_cost = _moa_search_queries(req.message)
+            prefetch_cost += q_cost
+            if queries:
+                yield sse({"type": "searching"})
+                block, prefetch_sources = _run_tavily_searches(queries)
+                if block:
+                    stream_messages = _inject_search_into_messages(messages_for_api, block)
         try:
             for text, tin, tout in stream_gemini(
-                model=_MODEL, messages_for_api=messages_for_api, system=system,
+                model=_MODEL, messages_for_api=stream_messages, system=system,
             ):
                 if text:
                     full_text += text
@@ -1111,14 +1077,24 @@ def chat_stream(req: ChatRequest):
 
     def generate_glm():
         """Streaming generator for GLM models, via LiteLLM's Z.ai provider."""
+        nonlocal prefetch_cost, prefetch_sources
         full_text = ""
         in_tokens = 0
         out_tokens = 0
         yield _emit_start()
+        stream_messages = messages_for_api
+        if not req.private and not is_continue and os.getenv("TAVILY_API_KEY"):
+            queries, q_cost = _moa_search_queries(req.message)
+            prefetch_cost += q_cost
+            if queries:
+                yield sse({"type": "searching"})
+                block, prefetch_sources = _run_tavily_searches(queries)
+                if block:
+                    stream_messages = _inject_search_into_messages(messages_for_api, block)
         try:
             for text, tin, tout in stream_glm(
                 model="zai/glm-5.2",
-                messages_for_api=messages_for_api, system=system,
+                messages_for_api=stream_messages, system=system,
             ):
                 if text:
                     full_text += text
@@ -1178,18 +1154,7 @@ def chat_stream(req: ChatRequest):
                 yield sse({"type": "searching"})
                 moa_search_block, moa_search_sources = _run_tavily_searches(queries)
 
-        proposer_messages = messages_for_api
-        if moa_search_block:
-            last = messages_for_api[-1]
-            raw_content = last.get("content")
-            if isinstance(raw_content, list):
-                content = [{"type": "text", "text": moa_search_block}] + list(raw_content)
-            else:
-                content = [
-                    {"type": "text", "text": moa_search_block},
-                    {"type": "text", "text": str(raw_content or "")},
-                ]
-            proposer_messages = messages_for_api[:-1] + [{"role": "user", "content": content}]
+        proposer_messages = _inject_search_into_messages(messages_for_api, moa_search_block)
 
         yield sse({"type": "moa_brainstorm"})
 
