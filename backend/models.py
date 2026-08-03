@@ -78,7 +78,8 @@ MODELS: dict[str, ModelConfig] = {
         id="glm-5.2",
         name="GLM", version="5.2",
         provider=PROVIDER_GLM, desc="Zhipu · Open weight",
-        pricing=lambda: (0.50, 2.00),
+        # Z.ai official: https://docs.z.ai/guides/overview/pricing (USD / 1M tokens)
+        pricing=lambda: (1.40, 4.40),
     ),
 }
 
