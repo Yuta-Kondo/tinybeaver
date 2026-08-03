@@ -832,10 +832,7 @@ def needs_topic_blob_migration() -> bool:
     row = _get_conn().execute(
         "SELECT COUNT(*) AS n FROM topics WHERE length(trim(content)) > 40"
     ).fetchone()
-    facts = _get_conn().execute(
-        "SELECT COUNT(*) AS n FROM memory_facts"
-    ).fetchone()
-    return int(row["n"] or 0) > 0 and int(facts["n"] or 0) == 0
+    return int(row["n"] or 0) > 0
 
 
 def migrate_topic_blobs_to_graph() -> dict:
