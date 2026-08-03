@@ -19,6 +19,11 @@ import {
 import Icon from "./Icon";
 import { WaitingIndicator } from "./WaitingIndicator";
 
+function labelFor(slug: string): string {
+  if (slug === "core") return "Core profile";
+  return slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export default function TopicsPanel() {
   const [topics, setTopics] = useState<TopicSummary[]>([]);
   const [query, setQuery] = useState("");
@@ -32,13 +37,13 @@ export default function TopicsPanel() {
   const [editText, setEditText] = useState("");
   const [saving, setSaving] = useState(false);
   const [reflecting, setReflecting] = useState(false);
-  const [reflectMsg, setReflectMsg] = useState("");
-  const [error, setError] = useState("");
   const [reindexing, setReindexing] = useState(false);
-  const [reindexMsg, setReindexMsg] = useState("");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
   const [searching, setSearching] = useState(false);
   const [loadingSlug, setLoadingSlug] = useState<string | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const factsScrollRef = useRef<HTMLDivElement>(null);
 
   const loadTopics = useCallback(async () => {
     try {
@@ -85,6 +90,13 @@ export default function TopicsPanel() {
     };
   }, [query]);
 
+  function clearDetail() {
+    setSelected(null);
+    setCoreOpen(false);
+    setEditingId(null);
+    setNewFact("");
+  }
+
   async function openTopic(slug: string) {
     setLoadingSlug(slug);
     setCoreOpen(false);
@@ -95,6 +107,9 @@ export default function TopicsPanel() {
       setError("");
       setEditingId(null);
       setNewFact("");
+      requestAnimationFrame(() => {
+        factsScrollRef.current?.scrollTo({ top: 0 });
+      });
     } catch {
       setError("Failed to load category.");
     } finally {
@@ -104,13 +119,13 @@ export default function TopicsPanel() {
 
   async function handleReflect() {
     setReflecting(true);
-    setReflectMsg("");
+    setStatus("");
     setError("");
     try {
       const updated = await reflect();
-      setReflectMsg(
+      setStatus(
         updated.length
-          ? `Consolidated graph (${updated.join(", ")})`
+          ? `Consolidated: ${updated.join(", ")}`
           : "Graph looks clean — nothing changed."
       );
       await loadTopics();
@@ -124,11 +139,11 @@ export default function TopicsPanel() {
 
   async function handleReindex() {
     setReindexing(true);
-    setReindexMsg("");
+    setStatus("");
     setError("");
     try {
       const count = await reindexTopics();
-      setReindexMsg(`Re-embedded ${count} fact${count === 1 ? "" : "s"}.`);
+      setStatus(`Re-embedded ${count} fact${count === 1 ? "" : "s"}.`);
     } catch {
       setError("Reindex failed.");
     } finally {
@@ -180,13 +195,15 @@ export default function TopicsPanel() {
     setSaving(true);
     try {
       await saveCoreProfile(core);
-      setReflectMsg("Core profile saved.");
+      setStatus("Core profile saved.");
     } catch {
       setError("Could not save core profile.");
     } finally {
       setSaving(false);
     }
   }
+
+  const inDetail = coreOpen || selected != null;
 
   const displayList = searchResults
     ? searchResults.map((r) => ({
@@ -197,165 +214,187 @@ export default function TopicsPanel() {
     : topics;
 
   return (
-    <div className="topics-panel">
-      <div className="topics-search-bar">
-        <input
-          type="text"
-          placeholder="Search facts…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="topics-search-input"
-        />
-      </div>
-
-      <div className="topics-list">
-        <button
-          className={`topic-row${coreOpen ? " active" : ""}`}
-          onClick={() => {
-            setCoreOpen(true);
-            setSelected(null);
-          }}
-          type="button"
-        >
-          <span className="topic-slug">core profile</span>
-          <span className="topic-desc">Always-on identity (capped)</span>
-        </button>
-        {searching && (
-          <div className="topics-list-wait">
-            <WaitingIndicator label="Searching memory…" size="sm" />
+    <div className={`mem-panel${inDetail ? " mem-panel--detail" : ""}`}>
+      {!inDetail && (
+        <>
+          <div className="mem-toolbar">
+            <input
+              type="search"
+              placeholder="Search facts…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="mem-search"
+              aria-label="Search memory facts"
+            />
           </div>
-        )}
-        {!searching && displayList.length === 0 && query && (
-          <p className="topics-empty">No results for "{query}"</p>
-        )}
-        {displayList.map((t) => (
-          <button
-            key={t.slug + (t.description || "")}
-            className={`topic-row ${selected?.slug === t.slug && !coreOpen ? "active" : ""}${
-              loadingSlug === t.slug ? " topic-row--loading" : ""
-            }`}
-            onClick={() => openTopic(t.slug)}
-            type="button"
-          >
-            <span className="topic-slug">
-              {t.slug}
-              {typeof t.fact_count === "number" ? ` · ${t.fact_count}` : ""}
-            </span>
-            {t.description && (
-              <span
-                className="topic-desc"
-                dangerouslySetInnerHTML={{
-                  __html: t.description.replace(/\*\*(.*?)\*\*/g, "<mark>$1</mark>"),
-                }}
-              />
+
+          <div className="mem-browse">
+            <button
+              className="mem-cat"
+              onClick={() => {
+                setCoreOpen(true);
+                setSelected(null);
+              }}
+              type="button"
+            >
+              <span className="mem-cat-main">
+                <span className="mem-cat-name">Core profile</span>
+                <span className="mem-cat-desc">Always on in every chat</span>
+              </span>
+              <span className="mem-cat-badge mem-cat-badge--muted" title="Pinned identity block">
+                pinned
+              </span>
+            </button>
+
+            {searching && (
+              <div className="mem-busy">
+                <WaitingIndicator label="Searching…" size="sm" />
+              </div>
             )}
-          </button>
-        ))}
-      </div>
+            {!searching && displayList.length === 0 && query && (
+              <p className="mem-empty">No results for “{query}”</p>
+            )}
+            {displayList.map((t) => (
+              <button
+                key={t.slug + (t.description || "")}
+                className={`mem-cat${loadingSlug === t.slug ? " mem-cat--loading" : ""}`}
+                onClick={() => openTopic(t.slug)}
+                type="button"
+              >
+                <span className="mem-cat-main">
+                  <span className="mem-cat-name">{labelFor(t.slug)}</span>
+                  {t.description && (
+                    <span className="mem-cat-desc">
+                      {t.description.replace(/\*\*/g, "")}
+                    </span>
+                  )}
+                </span>
+                {typeof t.fact_count === "number" && (
+                  <span
+                    className="mem-cat-badge"
+                    title={`${t.fact_count} active fact${t.fact_count === 1 ? "" : "s"} in this category`}
+                  >
+                    {t.fact_count}
+                    <span className="mem-cat-badge-unit">facts</span>
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
 
-      <div className="topics-footer">
-        <button
-          className="topics-footer-btn reflect-btn"
-          onClick={handleReindex}
-          disabled={reindexing}
-          title="Re-embed all active facts"
-          type="button"
-        >
-          {reindexing ? <WaitingIndicator label="Reindexing…" size="sm" /> : "↻ Reindex"}
-        </button>
-        <button
-          className="topics-footer-btn reflect-btn"
-          onClick={handleReflect}
-          disabled={reflecting}
-          title="Consolidate duplicates in the knowledge graph"
-          type="button"
-        >
-          {reflecting ? <WaitingIndicator label="Reflecting…" size="sm" /> : "⟳ Reflect"}
-        </button>
-      </div>
+          <div className="mem-footer">
+            <button
+              className="mem-tool"
+              onClick={handleReindex}
+              disabled={reindexing}
+              title="Rebuild search embeddings for all facts"
+              type="button"
+            >
+              {reindexing ? "Reindexing…" : "Reindex"}
+            </button>
+            <button
+              className="mem-tool"
+              onClick={handleReflect}
+              disabled={reflecting}
+              title="Merge duplicates and clean the knowledge graph"
+              type="button"
+            >
+              {reflecting ? "Reflecting…" : "Reflect"}
+            </button>
+          </div>
+        </>
+      )}
 
-      {reindexMsg && <p className="reflect-msg">{reindexMsg}</p>}
-      {reflectMsg && <p className="reflect-msg">{reflectMsg}</p>}
-      {error && <p className="topics-error">{error}</p>}
+      {(status || error) && !inDetail && (
+        <p className={error ? "mem-toast mem-toast--err" : "mem-toast"}>{error || status}</p>
+      )}
 
       {coreOpen && (
-        <div className="topic-editor">
-          <div className="topic-editor-header">
-            <div>
-              <strong className="topic-editor-slug">core profile</strong>
-              <span className="topic-editor-desc"> — always injected (short)</span>
+        <div className="mem-detail">
+          <header className="mem-detail-head">
+            <button className="mem-back" onClick={clearDetail} type="button" aria-label="Back">
+              ←
+            </button>
+            <div className="mem-detail-titles">
+              <h3 className="mem-detail-title">Core profile</h3>
+              <p className="mem-detail-sub">Short identity block injected every turn</p>
             </div>
-            <button className="icon-btn" onClick={() => setCoreOpen(false)} title="Close" type="button">
-              <Icon name="close" size={13} />
-            </button>
+          </header>
+          <div className="mem-detail-body">
+            <textarea
+              className="mem-textarea"
+              value={core}
+              onChange={(e) => setCore(e.target.value)}
+              spellCheck={false}
+              placeholder="Who you are, lasting prefs…"
+            />
           </div>
-          <textarea
-            className="topic-editor-textarea"
-            value={core}
-            onChange={(e) => setCore(e.target.value)}
-            spellCheck={false}
-            placeholder="Short identity / prefs for every chat turn…"
-          />
-          <div className="topic-editor-actions">
-            <button className="save-topic-btn" onClick={handleSaveCore} disabled={saving} type="button">
-              {saving ? <WaitingIndicator label="Saving…" size="sm" /> : "Save profile"}
+          <footer className="mem-detail-foot">
+            {(error || status) && (
+              <p className={error ? "mem-toast mem-toast--err" : "mem-toast"}>{error || status}</p>
+            )}
+            <button className="mem-btn mem-btn--primary" onClick={handleSaveCore} disabled={saving} type="button">
+              {saving ? "Saving…" : "Save"}
             </button>
-          </div>
+          </footer>
         </div>
       )}
 
       {selected && !coreOpen && (
-        <div className="topic-editor">
-          <div className="topic-editor-header">
-            <div>
-              <strong className="topic-editor-slug">{selected.slug}</strong>
+        <div className="mem-detail">
+          <header className="mem-detail-head">
+            <button className="mem-back" onClick={clearDetail} type="button" aria-label="Back">
+              ←
+            </button>
+            <div className="mem-detail-titles">
+              <h3 className="mem-detail-title">{labelFor(selected.slug)}</h3>
               {selected.description && (
-                <span className="topic-editor-desc"> — {selected.description}</span>
+                <p className="mem-detail-sub">{selected.description}</p>
               )}
             </div>
-            <button className="icon-btn" onClick={() => setSelected(null)} title="Close" type="button">
-              <Icon name="close" size={13} />
-            </button>
-          </div>
+            <span
+              className="mem-cat-badge"
+              title={`${facts.length} active fact${facts.length === 1 ? "" : "s"}`}
+            >
+              {facts.length}
+              <span className="mem-cat-badge-unit">facts</span>
+            </span>
+          </header>
 
-          <div className="memory-facts-list">
+          <div className="mem-detail-body" ref={factsScrollRef}>
             {facts.length === 0 && (
-              <p className="topics-empty">No active facts in this category yet.</p>
+              <p className="mem-empty">No facts here yet. Add one below.</p>
             )}
             {facts.map((f) => (
-              <div key={f.id} className="memory-fact-row">
+              <article key={f.id} className="mem-fact">
                 {editingId === f.id ? (
                   <>
                     <textarea
-                      className="memory-fact-edit"
+                      className="mem-textarea mem-textarea--compact"
                       value={editText}
                       onChange={(e) => setEditText(e.target.value)}
                       rows={3}
                     />
-                    <div className="memory-fact-actions">
+                    <div className="mem-fact-actions">
                       <button
-                        className="save-topic-btn"
+                        className="mem-btn mem-btn--primary"
                         onClick={() => handleSaveFact(f.id)}
                         disabled={saving}
                         type="button"
                       >
                         Save
                       </button>
-                      <button
-                        className="cancel-topic-btn"
-                        onClick={() => setEditingId(null)}
-                        type="button"
-                      >
+                      <button className="mem-btn" onClick={() => setEditingId(null)} type="button">
                         Cancel
                       </button>
                     </div>
                   </>
                 ) : (
                   <>
-                    <p className="memory-fact-text">{f.text}</p>
-                    <div className="memory-fact-actions">
+                    <p className="mem-fact-text">{f.text}</p>
+                    <div className="mem-fact-actions">
                       <button
-                        className="cancel-topic-btn"
+                        className="mem-btn"
                         onClick={() => {
                           setEditingId(f.id);
                           setEditText(f.text);
@@ -365,7 +404,7 @@ export default function TopicsPanel() {
                         Edit
                       </button>
                       <button
-                        className="cancel-topic-btn topic-delete-btn"
+                        className="mem-btn mem-btn--danger"
                         onClick={() => handleDeleteFact(f.id)}
                         type="button"
                       >
@@ -374,27 +413,30 @@ export default function TopicsPanel() {
                     </div>
                   </>
                 )}
-              </div>
+              </article>
             ))}
           </div>
 
-          <div className="memory-fact-add">
+          <footer className="mem-detail-foot mem-detail-foot--stack">
+            {(error || status) && (
+              <p className={error ? "mem-toast mem-toast--err" : "mem-toast"}>{error || status}</p>
+            )}
             <textarea
-              className="memory-fact-edit"
+              className="mem-textarea mem-textarea--compact"
               placeholder="Add an atomic fact…"
               value={newFact}
               onChange={(e) => setNewFact(e.target.value)}
               rows={2}
             />
             <button
-              className="save-topic-btn"
+              className="mem-btn mem-btn--primary"
               onClick={handleAddFact}
               disabled={saving || !newFact.trim()}
               type="button"
             >
               Add fact
             </button>
-          </div>
+          </footer>
         </div>
       )}
     </div>
