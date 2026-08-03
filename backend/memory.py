@@ -162,6 +162,73 @@ CREATE TRIGGER IF NOT EXISTS session_document_chunks_au AFTER UPDATE ON session_
     VALUES ('delete', old.id, old.text);
     INSERT INTO session_document_chunks_fts(rowid, text) VALUES (new.id, new.text);
 END;
+
+-- Always-on short profile (capped); never dump unbounded topic blobs.
+CREATE TABLE IF NOT EXISTS core_profile (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    content     TEXT NOT NULL DEFAULT '',
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL DEFAULT 'concept',
+    summary     TEXT NOT NULL DEFAULT '',
+    embedding   BLOB,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_name_type
+    ON entities(lower(name), type);
+
+CREATE TABLE IF NOT EXISTS relations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id         INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    to_id           INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    predicate       TEXT NOT NULL,
+    valid_from      TEXT NOT NULL DEFAULT (datetime('now')),
+    valid_to        TEXT,
+    source_session  TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_id, valid_to);
+CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_id, valid_to);
+
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    category        TEXT NOT NULL REFERENCES topics(slug),
+    text            TEXT NOT NULL,
+    entity_ids      TEXT NOT NULL DEFAULT '[]',
+    embedding       BLOB,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_by   INTEGER REFERENCES memory_facts(id),
+    active          INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_facts_cat_active
+    ON memory_facts(category, active, created_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
+    text,
+    content='memory_facts',
+    content_rowid=id,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_facts_ai AFTER INSERT ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_facts_ad AFTER DELETE ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_facts_au AFTER UPDATE ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+    INSERT INTO memory_facts_fts(rowid, text) VALUES (new.id, new.text);
+END;
 """
 
 # Migration: add columns that may not exist in older DBs
@@ -193,8 +260,27 @@ def _get_conn() -> sqlite3.Connection:
                 _run_migrations(c)
                 _migrate_legacy(c)
                 _ensure_doc_chunks_fts(c)
+                _ensure_memory_facts_fts(c)
                 _conn = c
+                try:
+                    from .memory_graph import ensure_fixed_categories
+                    ensure_fixed_categories()
+                except Exception:
+                    pass
     return _conn
+
+
+def _ensure_memory_facts_fts(conn: sqlite3.Connection) -> None:
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0]
+        fts_n = conn.execute("SELECT COUNT(*) FROM memory_facts_fts").fetchone()[0]
+        if n and fts_n == 0:
+            conn.execute(
+                "INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')"
+            )
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def _ensure_doc_chunks_fts(conn: sqlite3.Connection) -> None:
@@ -856,35 +942,26 @@ def search_document_chunks(
     query: str,
     limit: int = 16,
 ) -> list[dict]:
-    """Return the most relevant document passages for a query.
+    """Hybrid document retrieval with reciprocal rank fusion + neighbor expansion.
 
-    Hybrid: literal section/exercise refs → FTS → Gemini semantic cosine,
-    then expand ±1 neighbors so exercise bodies next to headings are included.
+    Lists: literal section/exercise refs, FTS5, Gemini semantic cosine.
+    Literal exercise hits expand ±2 neighbors; others ±1.
     """
     conn = _get_conn()
-    scored: dict[int, tuple[float, dict]] = {}
+    rrf: dict[int, float] = {}
+    items: dict[int, dict] = {}
+    literal_hit_ids: set[int] = set()
 
-    def _add(rows, base_score: float, literal: str | None = None) -> None:
-        for i, r in enumerate(rows):
-            item = _chunk_item(r)
-            cid = item["id"]
-            bonus = 0.0
-            text = item["text"]
-            if literal and literal in text:
-                head = text[:240].lower()
-                if f"exercise {literal}" in head or f"exercises {literal}" in head:
-                    bonus = 50.0
-                elif literal in head:
-                    bonus = 20.0
-                else:
-                    bonus = 5.0
-            score = base_score - i + bonus
-            item["score"] = round(score, 3)
-            prev = scored.get(cid)
-            if not prev or score > prev[0]:
-                scored[cid] = (score, item)
+    def _rrf_add(cid: int, rank: int, weight: float = 1.0) -> None:
+        rrf[cid] = rrf.get(cid, 0.0) + weight / (60.0 + rank)
 
-    # 1) Literal section/exercise number match (critical for "5.5", "3.2.1", …).
+    def _store(r) -> int:
+        item = _chunk_item(r)
+        cid = item["id"]
+        items[cid] = item
+        return cid
+
+    # 1) Literal section/exercise numbers
     for ref in _section_refs(query):
         try:
             rows = conn.execute(
@@ -912,11 +989,17 @@ def search_document_chunks(
                     limit,
                 ),
             ).fetchall()
-            _add(rows, base_score=100.0, literal=ref)
+            for i, r in enumerate(rows):
+                cid = _store(r)
+                text = items[cid]["text"]
+                head = text[:240].lower()
+                w = 2.5 if f"exercise {ref}" in head else 2.0
+                _rrf_add(cid, i, weight=w)
+                literal_hit_ids.add(cid)
         except sqlite3.OperationalError:
             pass
 
-    # 2) FTS for the remaining topical words.
+    # 2) FTS
     fts_q = _fts_query(query)
     if fts_q:
         try:
@@ -936,23 +1019,26 @@ def search_document_chunks(
                 (session_id, fts_q, limit * 2),
             ).fetchall()
             for i, r in enumerate(rows):
-                try:
-                    rank = float(r["rank"])
-                except (TypeError, ValueError, KeyError):
-                    rank = float(i)
-                _add([r], base_score=10.0 - rank)
+                cid = _store(r)
+                _rrf_add(cid, i, weight=1.0)
         except sqlite3.OperationalError:
             pass
 
-    # 3) Semantic: Gemini remote embeddings (skip if none stored / API unavailable).
+    # 3) Semantic
     try:
-        _semantic_add(conn, session_id, query, scored, limit=limit * 2)
+        scored_tmp: dict[int, tuple[float, dict]] = {}
+        _semantic_add(conn, session_id, query, scored_tmp, limit=limit * 2)
+        # Convert cosine-ranked list into RRF ranks
+        ordered = sorted(scored_tmp.values(), key=lambda x: x[0], reverse=True)
+        for i, (_, item) in enumerate(ordered):
+            cid = item["id"]
+            items[cid] = item
+            _rrf_add(cid, i, weight=1.2)
     except Exception:
         import traceback
         traceback.print_exc()
 
-    if not scored:
-        # 4) Lexical fallback: score chunks by token hit count.
+    if not rrf:
         import re
         tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query or "")]
         refs = _section_refs(query)
@@ -967,6 +1053,7 @@ def search_document_chunks(
             """,
             (session_id,),
         ).fetchall()
+        scored_lex: list[tuple[float, dict]] = []
         for r in rows:
             low = (r["text"] or "").lower()
             hits = sum(low.count(t) for t in tokens)
@@ -977,10 +1064,21 @@ def search_document_chunks(
                 continue
             item = _chunk_item(r)
             item["score"] = hits
-            scored[item["id"]] = (float(hits), item)
+            scored_lex.append((float(hits), item))
+        scored_lex.sort(key=lambda x: x[0], reverse=True)
+        for i, (_, item) in enumerate(scored_lex[:limit]):
+            items[item["id"]] = item
+            _rrf_add(item["id"], i, weight=1.0)
 
-    ranked = [item for _, item in sorted(scored.values(), key=lambda x: x[0], reverse=True)[:limit]]
-    return _expand_neighbors(conn, ranked, limit=limit)
+    ordered_ids = sorted(rrf.keys(), key=lambda k: rrf[k], reverse=True)[:limit]
+    ranked = []
+    for cid in ordered_ids:
+        item = items[cid]
+        item["score"] = round(rrf[cid], 4)
+        ranked.append(item)
+
+    wide = bool(literal_hit_ids & {h["id"] for h in ranked[:4]})
+    return _expand_neighbors(conn, ranked, limit=limit, window=2 if wide else 1)
 
 
 def _semantic_add(
@@ -1033,16 +1131,19 @@ def _expand_neighbors(
     conn: sqlite3.Connection,
     hits: list[dict],
     limit: int = 16,
+    window: int = 1,
 ) -> list[dict]:
-    """Include chunk_index ±1 for each hit so headings bring adjacent body text."""
+    """Include neighboring chunk_index values for each hit."""
     if not hits:
         return []
     seen: set[int] = {h["id"] for h in hits}
     out = list(hits)
+    offsets = [d for d in range(-window, window + 1) if d != 0]
     for h in hits:
         if len(out) >= limit:
             break
-        for neighbor_idx in (h["chunk_index"] - 1, h["chunk_index"] + 1):
+        for delta in offsets:
+            neighbor_idx = h["chunk_index"] + delta
             if neighbor_idx < 0 or len(out) >= limit:
                 continue
             row = conn.execute(
@@ -1057,10 +1158,9 @@ def _expand_neighbors(
             if not row or int(row["id"]) in seen:
                 continue
             item = _chunk_item(row)
-            item["score"] = round(float(h.get("score") or 0) - 0.5, 3)
+            item["score"] = round(float(h.get("score") or 0) - 0.5 * abs(delta), 3)
             seen.add(item["id"])
             out.append(item)
-    # Keep original rank order for primary hits; neighbors trail their parent.
     return out[:limit]
 
 

@@ -50,6 +50,16 @@ export interface StreamEvent {
 export interface TopicSummary {
   slug: string;
   description: string;
+  fact_count?: number;
+}
+
+export interface MemoryFact {
+  id: number;
+  category: string;
+  text: string;
+  entity_ids: number[];
+  created_at?: string;
+  active?: boolean;
 }
 
 export interface TopicDetail {
@@ -57,16 +67,20 @@ export interface TopicDetail {
   description: string;
   content: string;
   updated_at: string;
+  facts?: MemoryFact[];
+  fact_count?: number;
 }
 
 export interface SearchResult {
   slug: string;
   snippet: string;
+  fact_id?: number;
 }
 
 export interface SemanticResult {
   slug: string;
   score: number;
+  snippet?: string;
 }
 
 export interface Task {
@@ -228,7 +242,54 @@ export async function reflect(): Promise<string[]> {
   const r = await fetch("/reflect", { method: "POST" });
   if (!r.ok) throw new Error("Reflect failed");
   const data = await r.json();
-  return data.updated;
+  return data.updated ?? [];
+}
+
+export async function fetchMemoryFacts(category?: string): Promise<MemoryFact[]> {
+  const q = category ? `?category=${encodeURIComponent(category)}` : "";
+  const r = await fetch(`/memory/facts${q}`);
+  if (!r.ok) throw new Error("Failed to load facts");
+  const data = await r.json();
+  return data.facts ?? [];
+}
+
+export async function updateMemoryFact(id: number, text: string): Promise<void> {
+  const r = await fetch(`/memory/facts/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!r.ok) throw new Error("Failed to update fact");
+}
+
+export async function deleteMemoryFact(id: number): Promise<void> {
+  const r = await fetch(`/memory/facts/${id}`, { method: "DELETE" });
+  if (!r.ok) throw new Error("Failed to delete fact");
+}
+
+export async function addMemoryFact(category: string, text: string): Promise<void> {
+  const r = await fetch("/memory/facts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category, text }),
+  });
+  if (!r.ok) throw new Error("Failed to add fact");
+}
+
+export async function fetchCoreProfile(): Promise<string> {
+  const r = await fetch("/memory/core");
+  if (!r.ok) throw new Error("Failed to load core profile");
+  const data = await r.json();
+  return data.content ?? "";
+}
+
+export async function saveCoreProfile(content: string): Promise<void> {
+  const r = await fetch("/memory/core", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!r.ok) throw new Error("Failed to save core profile");
 }
 
 // ---------------------------------------------------------------------------

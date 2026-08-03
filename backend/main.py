@@ -36,18 +36,14 @@ from .memory import (
     get_session,
     get_session_documents,
     get_task,
-    get_topics_content,
     list_sessions,
     list_tasks,
-    load_context,
     save_message,
     save_session,
     save_task,
     search_document_chunks,
     search_sessions,
-    search_topics,
     toggle_task,
-    topic_descriptions,
     update_message_meta,
     update_session_summary,
     update_session_title,
@@ -81,8 +77,23 @@ from .providers import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: touch DB to run migrations
+    # Startup: touch DB to run migrations + seed fixed categories
     available_topics()
+    try:
+        from .memory_graph import ensure_fixed_categories, needs_topic_blob_migration, migrate_topic_blobs_to_graph
+        ensure_fixed_categories()
+        if needs_topic_blob_migration():
+            import threading
+            def _migrate():
+                try:
+                    result = migrate_topic_blobs_to_graph()
+                    print(f"Memory graph migration: {result}")
+                except Exception as e:
+                    print(f"Memory graph migration failed: {e}")
+            threading.Thread(target=_migrate, name="memory-migrate", daemon=True).start()
+            print("Started background migration of topic blobs → knowledge graph")
+    except Exception as e:
+        print(f"Memory graph startup warning: {e}")
     # Clear orphaned "processing" docs left by a previous crash/restart.
     try:
         from .doc_store import reset_stuck_ingests
@@ -127,10 +138,10 @@ Format responses in Markdown. Use LaTeX for all mathematics \
 (inline: $...$, block: $$...$$).
 
 To explicitly save a fact to memory mid-response, write:
-[[SAVE:topic_slug:The fact to save.]]
-This works for any existing topic slug. Use sparingly — only for personal facts \
-about Yuta (preferences, decisions, plans, experiences). Never save general \
-knowledge, definitions, or facts that could be looked up online.
+[[SAVE:category:The fact to save.]]
+Categories: profile, phd, finance, immigration, housing, projects, health, preferences.
+Use sparingly — only for personal facts about Yuta (preferences, decisions, plans, experiences). \
+Never save general knowledge, definitions, or facts that could be looked up online.
 
 When you mention a specific place the user would want to visit (a store, restaurant, \
 venue, address), add a map marker on its own line:
@@ -316,6 +327,24 @@ _RETRIEVE_CHUNK_LIMIT = 16
 _RETRIEVE_CONTEXT_CHARS = 48_000
 
 
+def _rewrite_doc_query(query: str) -> str:
+    """Cheap rewrite to expand paraphrases + keep section numbers for retrieval."""
+    q = (query or "").strip()
+    if len(q) < 12:
+        return q
+    from .llm import llm_json, strip_code_fence
+    from .models import UTILITY_MODEL
+    prompt = (
+        "Rewrite this question into a short search query for a textbook/PDF. "
+        "Keep exercise/section numbers (e.g. 5.5). Add 3–8 key terms. "
+        "Return ONLY the search query text, no quotes.\n\n"
+        f"Question: {q[:800]}"
+    )
+    text, _ = llm_json(prompt, model=UTILITY_MODEL, max_tokens=80)
+    out = strip_code_fence(text).strip().strip('"').strip("'")
+    return out[:400] if out else q
+
+
 def _session_documents_context(session_id: str, query: str = "") -> str:
     """Build the documents block for the system prompt.
 
@@ -361,8 +390,23 @@ def _session_documents_context(session_id: str, query: str = "") -> str:
     except Exception:
         pass
 
+    search_query = query
     try:
-        hits = search_document_chunks(session_id, query, limit=_RETRIEVE_CHUNK_LIMIT)
+        search_query = _rewrite_doc_query(query)
+    except Exception:
+        search_query = query
+
+    try:
+        hits = search_document_chunks(session_id, search_query, limit=_RETRIEVE_CHUNK_LIMIT)
+        # Also search original query if rewrite dropped section refs.
+        if search_query != query:
+            extra = search_document_chunks(session_id, query, limit=_RETRIEVE_CHUNK_LIMIT)
+            seen = {h["id"] for h in hits}
+            for h in extra:
+                if h["id"] not in seen:
+                    hits.append(h)
+                    seen.add(h["id"])
+            hits = hits[:_RETRIEVE_CHUNK_LIMIT]
     except Exception:
         import traceback; traceback.print_exc()
         hits = []
@@ -442,51 +486,18 @@ def _build_system(context: str, summary: str, documents: str = "") -> list[dict]
 
 
 def _update_memory(
-    topics: list[str], user_msg: str, assistant_msg: str, new_topic: str | None
+    topics: list[str], user_msg: str, assistant_msg: str, new_topic: str | None = None
 ) -> tuple[list[str], float]:
-    """Returns (updated_slugs, cost_usd)."""
-    if not topics:
-        return [], 0.0
+    """Write atomic facts/entities into the knowledge graph. Returns (categories, cost)."""
+    from .memory_graph import update_memory_graph
 
-    topic_contents = get_topics_content(topics)
-    sections = "\n\n".join(
-        f"### {t}\n{c or '(empty)'}" for t, c in topic_contents.items()
-    )
-    new_topic_note = (
-        f"\nNote: '{new_topic}' is a newly created topic with no content. "
-        "Populate it from the conversation if relevant."
-        if new_topic else ""
-    )
-    prompt = f"""You are updating Yuta's personal memory files based on a conversation.
-
-Current memory:
-{sections}
-
-Conversation:
-User: {user_msg[:3000]}
-Assistant: {assistant_msg[:1500]}
-{new_topic_note}
-For each topic that gained new **personal** information about Yuta worth persisting, return updated markdown.
-Only save: personal facts, preferences, decisions, plans, experiences, and context specific to Yuta.
-Never save: general knowledge, how-to explanations, definitions, or anything that could be looked up online.
-Return ONLY a JSON object: {{"topic_slug": "updated content", ...}}
-Omit topics with no changes. If nothing changed, return {{}}.
-Memory files are concise personal summaries, not transcripts. Do not invent facts."""
-
-    text, cost = llm_json(prompt, model=UTILITY_MODEL, max_tokens=4096)
-    updates: dict = json.loads(strip_code_fence(text))
-    allowed = set(topics)
-    updated: list[str] = []
-    for slug, content in updates.items():
-        if slug in allowed:
-            from .memory import save_topic
-            save_topic(slug, content)
-            try:
-                _reindex_topic_embedding(slug, content)
-            except Exception:
-                pass
-            updated.append(slug)
-    return updated, cost
+    cats = list(topics or [])
+    if new_topic:
+        cats.append(new_topic)
+    if not cats:
+        from .memory_graph import FIXED_CATEGORIES
+        cats = list(FIXED_CATEGORIES.keys())
+    return update_memory_graph(cats, user_msg, assistant_msg)
 
 
 def _summarize_messages(msgs: list[dict], existing_summary: str) -> str:
@@ -681,19 +692,15 @@ def chat_stream(req: ChatRequest):
 
         all_topics = available_topics()
         mentioned = _parse_mentions(req.message, all_topics)
-        relevant_topics, new_topic = classify(req.message)
+        relevant_topics, _ = classify(req.message)
+        new_topic = None  # fixed category catalog — never invent slugs
 
         forced = set(mentioned)
         relevant_topics = list(forced | set(relevant_topics))
 
-        if new_topic:
-            try:
-                create_topic(new_topic)
-            except ValueError:
-                new_topic = None
-
-        update_topics = relevant_topics + ([new_topic] if new_topic else [])
-        context = load_context(relevant_topics)
+        update_topics = list(relevant_topics) or ["profile", "preferences"]
+        from .memory_graph import retrieve_memory
+        context = retrieve_memory(req.message, categories=relevant_topics or None)
         api_messages, summary = get_api_messages(session_id)
         system = _build_system(context, summary, _session_documents_context(session_id, req.message))
 
@@ -926,12 +933,10 @@ def chat_stream(req: ChatRequest):
             edit_message(session_id, req.continue_message_id, merged)
             assistant_msg_id = req.continue_message_id
         elif not req.private:
+            from .memory_graph import FIXED_CATEGORIES, save_explicit_fact
             for slug, fact in explicit_saves:
-                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
-                    from .memory import get_topic, save_topic
-                    row = get_topic(slug)
-                    existing = row["content"] if row else ""
-                    save_topic(slug, f"{existing}\n- {fact}".strip())
+                if slug in set(all_topics) | set(FIXED_CATEGORIES) | ({new_topic} if new_topic else set()):
+                    save_explicit_fact(slug, fact)
 
             assistant_msg_id = save_message(session_id, "assistant", clean_text)
 
@@ -942,7 +947,7 @@ def chat_stream(req: ChatRequest):
             except Exception:
                 import traceback; traceback.print_exc()
 
-            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics) | set(FIXED_CATEGORIES)})
 
             try:
                 _maybe_summarize(session_id)
@@ -978,14 +983,12 @@ def chat_stream(req: ChatRequest):
         return continue_msg_id
 
     def _save_explicit(explicit_saves, all_topics, new_topic):
-        """Persist inline [[SAVE:slug:fact]] markers the model emitted."""
-        valid = set(all_topics) | ({new_topic} if new_topic else set())
+        """Persist inline [[SAVE:category:fact]] markers into the knowledge graph."""
+        from .memory_graph import FIXED_CATEGORIES, save_explicit_fact
+        valid = set(all_topics) | set(FIXED_CATEGORIES) | ({new_topic} if new_topic else set())
         for slug, fact in explicit_saves:
-            if slug in valid:
-                from .memory import get_topic, save_topic
-                row = get_topic(slug)
-                existing = row["content"] if row else ""
-                save_topic(slug, f"{existing}\n- {fact}".strip())
+            if slug in valid or slug in FIXED_CATEGORIES:
+                save_explicit_fact(slug, fact)
 
     def generate_gemini():
         """Streaming generator for Gemini models."""
@@ -1224,12 +1227,10 @@ def chat_stream(req: ChatRequest):
         updated: list[str] = []
         assistant_msg_id = None
         if not req.private:
+            from .memory_graph import FIXED_CATEGORIES, save_explicit_fact
             for slug, fact in explicit_saves:
-                if slug in set(all_topics) | ({new_topic} if new_topic else set()):
-                    from .memory import get_topic, save_topic
-                    row = get_topic(slug)
-                    existing = row["content"] if row else ""
-                    save_topic(slug, f"{existing}\n- {fact}".strip())
+                if slug in set(all_topics) | set(FIXED_CATEGORIES) | ({new_topic} if new_topic else set()):
+                    save_explicit_fact(slug, fact)
             drafts_for_db = [
                 {"persona": p, "text": t, "model": m, "done": True}
                 for p, t, m in drafts
@@ -1242,7 +1243,7 @@ def chat_stream(req: ChatRequest):
                 updated, memory_cost = _update_memory(update_topics, req.message, clean_text, new_topic)
             except Exception:
                 pass
-            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics)})
+            updated = list(set(updated) | {s for s, _ in explicit_saves if s in set(all_topics) | set(FIXED_CATEGORIES)})
             try:
                 _maybe_summarize(session_id)
             except Exception:
@@ -1513,17 +1514,17 @@ def feedback(body: dict):
 
 
 # ---------------------------------------------------------------------------
-# Topics
+# Topics / memory graph
 # ---------------------------------------------------------------------------
 
 @app.get("/topics")
 def topics_list():
-    descs = topic_descriptions()
-    return {"topics": [{"slug": slug, "description": desc} for slug, desc in descs.items()]}
+    from .memory_graph import category_summaries
+    return {"topics": category_summaries()}
 
 
 class TopicBody(BaseModel):
-    content: str
+    content: str = ""
     description: str = ""
 
 
@@ -1531,32 +1532,130 @@ class CreateTopicBody(BaseModel):
     description: str = ""
 
 
+class FactBody(BaseModel):
+    text: str
+    category: str = "projects"
+
+
+class FactUpdateBody(BaseModel):
+    text: str
+
+
+@app.get("/memory/facts")
+def memory_facts_list(category: str | None = None):
+    from .memory_graph import list_facts
+    return {"facts": list_facts(category)}
+
+
+@app.get("/memory/core")
+def memory_core_get():
+    from .memory_graph import get_core_profile
+    return {"content": get_core_profile()}
+
+
+@app.put("/memory/core")
+def memory_core_put(body: TopicBody):
+    from .memory_graph import set_core_profile
+    set_core_profile(body.content or "")
+    return {"ok": True}
+
+
+@app.put("/memory/facts/{fact_id}")
+def memory_fact_update(fact_id: int, body: FactUpdateBody):
+    from .memory_graph import update_fact_text
+    if not update_fact_text(fact_id, body.text):
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return {"ok": True}
+
+
+@app.delete("/memory/facts/{fact_id}")
+def memory_fact_delete(fact_id: int):
+    from .memory_graph import delete_fact
+    if not delete_fact(fact_id):
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return {"ok": True}
+
+
+@app.post("/memory/facts")
+def memory_fact_add(body: FactBody):
+    from .memory_graph import add_fact, save_explicit_fact
+    cat = save_explicit_fact(body.category, body.text)
+    return {"ok": True, "category": cat}
+
+
+@app.get("/memory/entities")
+def memory_entities_list():
+    from .memory_graph import list_entities
+    return {"entities": list_entities()}
+
+
+@app.get("/memory/entities/{entity_id}/neighbors")
+def memory_entity_neighbors(entity_id: int):
+    from .memory_graph import entity_neighbors
+    return {"neighbors": entity_neighbors(entity_id)}
+
+
+@app.post("/memory/migrate")
+def memory_migrate():
+    from .memory_graph import migrate_topic_blobs_to_graph
+    return migrate_topic_blobs_to_graph()
+
+
 @app.get("/topics/search")
 def topics_search(q: str):
-    return {"results": search_topics(q)}
+    from .memory_graph import list_facts
+    qlow = (q or "").lower()
+    hits = []
+    for f in list_facts(limit=300):
+        if qlow in f["text"].lower() or qlow in f["category"]:
+            hits.append({"slug": f["category"], "snippet": f["text"][:120], "fact_id": f["id"]})
+        if len(hits) >= 20:
+            break
+    return {"results": hits}
 
 
 @app.get("/topics/semantic-search")
 def topics_semantic_search(q: str):
-    try:
-        from .embeddings import semantic_search
-        return {"results": semantic_search(q)}
-    except Exception as e:
-        return {"results": [], "error": str(e)}
+    from .memory_graph import retrieve_memory, _search_facts
+    facts = _search_facts(q, limit=12)
+    return {
+        "results": [
+            {"slug": f["category"], "score": 1.0 - i * 0.05, "snippet": f["text"][:160]}
+            for i, f in enumerate(facts)
+        ]
+    }
 
 
 @app.post("/topics/reindex")
 def topics_reindex():
+    """Re-embed all active facts with Gemini."""
+    from .doc_embeddings import embed_bytes, embed_documents
+    from .memory import _get_conn
+    from .memory_graph import list_facts
+
+    facts = list_facts(limit=2000)
+    if not facts:
+        return {"ok": True, "updated": 0}
+    texts = [f["text"] for f in facts]
     try:
-        from .embeddings import reindex_all
-        count = reindex_all()
-        return {"ok": True, "updated": count}
+        vectors = embed_documents(texts)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    conn = _get_conn()
+    for f, vec in zip(facts, vectors):
+        conn.execute(
+            "UPDATE memory_facts SET embedding = ? WHERE id = ?",
+            (embed_bytes(vec), f["id"]),
+        )
+    conn.commit()
+    return {"ok": True, "updated": len(facts)}
 
 
 @app.delete("/topics/{slug}")
 def topic_delete(slug: str):
+    from .memory_graph import FIXED_CATEGORIES
+    if slug in FIXED_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Cannot delete a fixed category")
     from .memory import delete_topic, get_topic
     if not get_topic(slug):
         raise HTTPException(status_code=404, detail="Topic not found")
@@ -1567,24 +1666,25 @@ def topic_delete(slug: str):
 @app.get("/topics/{slug}")
 def topic_read(slug: str):
     from .memory import get_topic
+    from .memory_graph import list_facts
     row = get_topic(slug)
     if not row:
         raise HTTPException(status_code=404, detail="Topic not found")
-    return row
+    facts = list_facts(slug)
+    return {
+        **row,
+        "content": "\n".join(f"- {f['text']}" for f in facts),
+        "facts": facts,
+        "fact_count": len(facts),
+    }
 
 
 @app.put("/topics/{slug}")
 def topic_upsert(slug: str, body: TopicBody):
+    """Legacy: description update only. Content blobs are no longer written."""
     try:
         from .memory import save_topic
-        save_topic(slug, body.content, body.description)
-        # Reindex embedding
-        try:
-            from .embeddings import embed_bytes
-            from .memory import save_topic_embedding
-            save_topic_embedding(slug, embed_bytes(f"{slug} {body.description} {body.content}"))
-        except Exception:
-            pass
+        save_topic(slug, "", body.description)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
@@ -1592,6 +1692,9 @@ def topic_upsert(slug: str, body: TopicBody):
 
 @app.post("/topics/{slug}")
 def topic_create(slug: str, body: CreateTopicBody | None = None):
+    from .memory_graph import FIXED_CATEGORIES
+    if slug in FIXED_CATEGORIES:
+        return {"ok": True, "slug": slug}
     desc = body.description if body else ""
     try:
         create_topic(slug, desc)
@@ -1694,42 +1797,13 @@ def push_unsubscribe(body: PushSubscribeBody):
 
 @app.post("/reflect")
 def reflect():
-    topics = available_topics()
-    if not topics:
-        return {"ok": True, "updated": []}
-
-    contents = get_topics_content(topics)
-    non_empty = {t: c for t, c in contents.items() if c.strip()}
-    if not non_empty:
-        return {"ok": True, "updated": []}
-
-    sections = "\n\n".join(f"### {t}\n{c}" for t, c in non_empty.items())
-    prompt = f"""Review Yuta's personal memory files and improve them.
-
-{sections}
-
-Tasks:
-1. Remove duplicate or redundant facts
-2. Consolidate scattered notes about the same subject into clean bullet points
-3. Improve conciseness — facts only, no filler
-4. Do NOT invent facts, add speculation, or change the meaning
-
-Return ONLY a JSON object: {{"slug": "revised content", ...}}
-Only include topics that need changes. If all looks good, return {{}}."""
-
-    text, _cost = llm_json(prompt, model=UTILITY_MODEL, max_tokens=8096)
-    updates: dict = json.loads(strip_code_fence(text))
-    updated: list[str] = []
-    from .memory import save_topic
-    for slug, content in updates.items():
-        if slug in topics:
-            save_topic(slug, content)
-            try:
-                _reindex_topic_embedding(slug, content)
-            except Exception:
-                pass
-            updated.append(slug)
-    return {"ok": True, "updated": updated}
+    from .memory_graph import consolidate_graph
+    result = consolidate_graph()
+    return {
+        "ok": True,
+        "updated": result.get("updated") or [],
+        "merged": result.get("merged", 0),
+    }
 
 
 # ---------------------------------------------------------------------------
