@@ -244,6 +244,19 @@ No search: personal questions about Yuta, coding help, timeless knowledge, opini
 Message: {message}"""
 
 
+_MOA_SEARCH_NEED_PROMPT = """\
+You prepare web search for a multi-agent decision helper (Self-MoA).
+Return ONLY JSON: {{"queries": ["short search query", ...]}}
+
+Include 1–3 queries when the decision benefits from live/external facts: salaries, prices,
+visa/immigration rules, academic deadlines, company/product status, policies, rates,
+schedules, news, comparisons that change over time.
+Use empty queries [] when personal context, memory, or timeless reasoning is enough —
+do not search for pure preference or "what should I do" with no factual dependency.
+
+User message: {message}"""
+
+
 def _prefetch_web_search(message: str) -> tuple[str, list[dict], float]:
     """Pre-run Tavily for non-Claude-tool paths. Returns (context_block, sources, cost_usd)."""
     if not os.getenv("TAVILY_API_KEY"):
@@ -265,6 +278,65 @@ def _prefetch_web_search(message: str) -> tuple[str, list[dict], float]:
         return block, sources, cost
     except Exception:
         return "", [], 0.0
+
+
+def _moa_search_queries(message: str) -> tuple[list[str], float]:
+    """Decide 0–3 web queries for Self-MoA. Returns (queries, classifier_cost)."""
+    if not os.getenv("TAVILY_API_KEY"):
+        return [], 0.0
+    try:
+        text, cost = llm_json(
+            _MOA_SEARCH_NEED_PROMPT.format(message=message[:1500]),
+            model=UTILITY_MODEL,
+            max_tokens=120,
+        )
+        data = json.loads(strip_code_fence(text))
+        raw_queries = data.get("queries") or []
+        if not isinstance(raw_queries, list):
+            return [], cost
+        queries: list[str] = []
+        seen: set[str] = set()
+        for q in raw_queries[:3]:
+            q = (q or "").strip()
+            if not q:
+                continue
+            key = q.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(q[:200])
+        return queries, cost
+    except Exception:
+        return [], 0.0
+
+
+def _run_tavily_searches(queries: list[str]) -> tuple[str, list[dict]]:
+    """Run Tavily for each query in parallel. Returns (combined_block, sources)."""
+    if not queries:
+        return "", []
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        results = list(pool.map(_run_tavily_search, queries))
+    blocks: list[str] = []
+    sources: list[dict] = []
+    for query, (result_text, srcs) in zip(queries, results):
+        n_offset = len(sources)
+        sources.extend(
+            {"n": n_offset + i + 1, "url": s["url"], "title": s.get("title", s["url"])}
+            for i, s in enumerate(srcs)
+        )
+        blocks.append(f"[Web search results for: {query}]\n{result_text}\n[End of web search]")
+    return "\n\n".join(blocks), sources
+
+
+def _prefetch_web_search_for_moa(message: str) -> tuple[str, list[dict], float]:
+    """Decision-aware prefetch for Self-MoA (non-streaming helper). Returns (block, sources, cost)."""
+    queries, cost = _moa_search_queries(message)
+    if not queries:
+        return "", [], cost
+    block, sources = _run_tavily_searches(queries)
+    return block, sources, cost
 
 
 def _reindex_topic_embedding(slug: str, content: str, description: str = "") -> None:
@@ -733,8 +805,10 @@ def chat_stream(req: ChatRequest):
     prefetch_block = ""
     prefetch_sources: list[dict] = []
     prefetch_cost = 0.0
+    # Self-MoA runs its own decision-aware search inside generate_moa (with SSE).
     if (
-        not uses_native_tools
+        not req.multi_agent
+        and not uses_native_tools
         and not req.private
         and not is_continue
         and os.getenv("TAVILY_API_KEY")
@@ -1093,12 +1167,34 @@ def chat_stream(req: ChatRequest):
         if urls:
             meta["fetched_urls"] = urls
         yield sse(meta)
-        if prefetch_sources:
-            yield sse({"type": "searching"})
+
+        # Decision-aware web search before proposers (visible in UI as "searching").
+        moa_search_block = ""
+        moa_search_sources: list[dict] = []
+        moa_search_cost = 0.0
+        if not req.private and os.getenv("TAVILY_API_KEY"):
+            queries, moa_search_cost = _moa_search_queries(req.message)
+            if queries:
+                yield sse({"type": "searching"})
+                moa_search_block, moa_search_sources = _run_tavily_searches(queries)
+
+        proposer_messages = messages_for_api
+        if moa_search_block:
+            last = messages_for_api[-1]
+            raw_content = last.get("content")
+            if isinstance(raw_content, list):
+                content = [{"type": "text", "text": moa_search_block}] + list(raw_content)
+            else:
+                content = [
+                    {"type": "text", "text": moa_search_block},
+                    {"type": "text", "text": str(raw_content or "")},
+                ]
+            proposer_messages = messages_for_api[:-1] + [{"role": "user", "content": content}]
+
         yield sse({"type": "moa_brainstorm"})
 
         system_str = flatten_system(system)
-        agents_cost = prefetch_cost
+        agents_cost = prefetch_cost + moa_search_cost
         event_q: queue.Queue = queue.Queue()
         # persona -> {text, model, in_tok, out_tok, error}
         results: dict[str, dict] = {}
@@ -1112,6 +1208,8 @@ def chat_stream(req: ChatRequest):
                 f"(roles: {', '.join(a.persona for a in moa_agents)}). "
                 f"You do not see the others' drafts.\n\n"
                 f"Your role ({persona}): {agent.instruction}\n\n"
+                "If web search results are included in the user message, use them when relevant "
+                "and cite with [n] where possible. Do not invent live facts you were not given.\n\n"
                 f"{MOA_CONFIDENCE_FOOTER}"
             )
             event_q.put(("start", persona, model_id, None))
@@ -1120,7 +1218,7 @@ def chat_stream(req: ChatRequest):
             try:
                 for text, tin, tout in stream_glm(
                     model=MOA_GLM_API_MODEL,
-                    messages_for_api=messages_for_api,
+                    messages_for_api=proposer_messages,
                     system=agent_system,
                     temperature=agent.temperature,
                 ):
@@ -1185,14 +1283,21 @@ def chat_stream(req: ChatRequest):
             for p, t, _, c in drafts
         )
         role_names = ", ".join(a.persona for a in moa_agents)
+        search_section = (
+            f"\n\n<web_search>\n{moa_search_block}\n</web_search>\n"
+            if moa_search_block
+            else "\n\n<web_search>No live web search was run for this question.</web_search>\n"
+        )
         synthesis_msg = (
             f"{n_agents} agents ({role_names}) proposed independently in parallel on the user's "
             "query (Self-MoA). Each ends with a Confidence score (0–1). Synthesize the best "
             "unified answer: weight agreement by confidence, keep the strongest recommendation, "
             "honor valid critiques, include one concrete next step, and surface dissent "
-            "explicitly rather than averaging disagreements away. Do not invent Confidence lines "
+            "explicitly rather than averaging disagreements away. Prefer claims grounded in "
+            "web_search when present; cite with [n] when useful. Do not invent Confidence lines "
             "in your final answer.\n\n"
-            f"<user_query>{req.message}</user_query>\n\n"
+            f"<user_query>{req.message}</user_query>"
+            f"{search_section}\n"
             f"<proposals>\n{draft_block}\n</proposals>"
         )
 
@@ -1254,7 +1359,7 @@ def chat_stream(req: ChatRequest):
         cost_bd = {"chat": round(agents_cost + chat_cost, 6), "memory": round(memory_cost, 6)}
         if assistant_msg_id is not None:
             update_message_meta(assistant_msg_id, 'moa', total_cost, cost_bd)
-        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': prefetch_sources})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'updated_topics': updated, 'model': 'moa', 'cost_usd': total_cost, 'cost_breakdown': cost_bd, 'locations': locations, 'search_sources': moa_search_sources})}\n\n"
 
     if is_continue:
         # Continuation always uses the standard Claude generator (it holds the merge logic).
