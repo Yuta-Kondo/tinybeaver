@@ -12,16 +12,59 @@ from typing import Any
 
 _log = logging.getLogger(__name__)
 
+# MECE life-domain catalog (primary filing homes). Core profile is separate —
+# always-on synthesis, not a peer category. Entities cross-link across domains.
 FIXED_CATEGORIES: dict[str, str] = {
-    "profile": "Identity, background, and always-relevant personal facts",
-    "phd": "PhD program, research, advisors, coursework",
-    "finance": "Money, banking, investments, budgets",
-    "immigration": "Visa, status, immigration paperwork",
-    "housing": "Housing search, leases, landlords, neighborhoods",
-    "projects": "Side projects, engineering work, apps",
-    "health": "Health, fitness, medical notes",
-    "preferences": "Preferences, style, communication, tools",
+    "identity": "Who Yuta is — background, values, biography (not day-to-day prefs)",
+    "career": "PhD, research, jobs, advisors, professional work",
+    "money": "Banking, budget, taxes, investments",
+    "admin": "Immigration, government, legal, visas, paperwork",
+    "home": "Housing, address, landlord, neighborhood",
+    "body": "Health, fitness, sleep, medical",
+    "people": "Family, dating, friends, social relationships",
+    "craft": "Skills, tools, languages, learning, engineering practice",
+    "play": "Hobbies, recreation, fun (sailing, games, etc.)",
+    "ops": "How the assistant should behave — communication & workflow prefs",
+    "misc": "Explicit overflow only when nothing above fits",
 }
+
+# Legacy → MECE remaps (old topic blobs / early graph categories).
+CATEGORY_ALIASES: dict[str, str] = {
+    "profile": "identity",
+    "phd": "career",
+    "finance": "money",
+    "investments": "money",
+    "immigration": "admin",
+    "housing": "home",
+    "health": "body",
+    "preferences": "ops",
+    "projects": "craft",
+    "ai-agent": "craft",
+    "ai-tools": "craft",
+    "devops-infrastructure": "craft",
+    "english-learning": "craft",
+    "dating": "people",
+    "hair": "body",
+    "clothing": "ops",
+    "css-sailing": "play",
+    "current": "career",
+    "feedback": "ops",
+}
+
+# Resolver priority when a fact could fit multiple domains (first match wins).
+RESOLVER_ORDER: tuple[str, ...] = (
+    "identity",
+    "admin",
+    "career",
+    "money",
+    "home",
+    "body",
+    "people",
+    "craft",
+    "play",
+    "ops",
+    "misc",
+)
 
 CORE_PROFILE_MAX_CHARS = 3500
 MEMORY_CONTEXT_BUDGET = 7500
@@ -42,10 +85,7 @@ def ensure_fixed_categories() -> None:
             INSERT INTO topics (slug, description, content)
             VALUES (?, ?, '')
             ON CONFLICT(slug) DO UPDATE SET
-                description = CASE
-                    WHEN topics.description = '' THEN excluded.description
-                    ELSE topics.description
-                END
+                description = excluded.description
             """,
             (slug, desc),
         )
@@ -55,6 +95,7 @@ def ensure_fixed_categories() -> None:
         "INSERT OR IGNORE INTO core_profile (id, content) VALUES (1, '')"
     )
     conn.commit()
+    remap_legacy_categories()
 
 
 def get_core_profile() -> str:
@@ -102,14 +143,17 @@ def category_summaries() -> list[dict]:
     }
     out = []
     seen: set[str] = set()
-    for slug, desc in FIXED_CATEGORIES.items():
+    for slug in RESOLVER_ORDER:
+        if slug not in FIXED_CATEGORIES:
+            continue
+        desc = FIXED_CATEGORIES[slug]
         out.append({
             "slug": slug,
             "description": descs.get(slug) or desc,
             "fact_count": counts.get(slug, 0),
         })
         seen.add(slug)
-    # Legacy categories that still have facts
+    # Legacy categories that still have facts (should be rare after remap)
     for slug, n in sorted(counts.items()):
         if slug in seen or n <= 0:
             continue
@@ -365,17 +409,56 @@ def add_fact(
 
 
 def _normalize_category(category: str) -> str:
+    """Map any slug/alias onto the MECE catalog (unknown → misc)."""
     from .memory import _get_conn
 
     c = (category or "").strip().lower().replace(" ", "-")
+    if not c:
+        return "misc"
     if c in FIXED_CATEGORIES:
         return c
+    if c in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[c]
+    # Legacy topic that still exists but isn't aliased → misc (not invent new domains).
     row = _get_conn().execute(
         "SELECT slug FROM topics WHERE slug = ?", (c,)
     ).fetchone()
-    if row:
-        return c
-    return "projects"
+    if row and c not in FIXED_CATEGORIES:
+        return "misc"
+    return "misc"
+
+
+def remap_legacy_categories() -> int:
+    """Rewrite memory_facts.category from legacy slugs to MECE domains."""
+    from .memory import _get_conn
+
+    conn = _get_conn()
+    n = 0
+    for old, new in CATEGORY_ALIASES.items():
+        if old == new or new not in FIXED_CATEGORIES:
+            continue
+        # Ensure destination topic exists (FK).
+        conn.execute(
+            "INSERT OR IGNORE INTO topics (slug, description, content) VALUES (?, ?, '')",
+            (new, FIXED_CATEGORIES.get(new, "")),
+        )
+        cur = conn.execute(
+            "UPDATE memory_facts SET category = ? WHERE category = ?",
+            (new, old),
+        )
+        n += cur.rowcount or 0
+    # Any active fact still outside the catalog → misc.
+    placeholders = ",".join("?" * len(FIXED_CATEGORIES))
+    cur = conn.execute(
+        f"UPDATE memory_facts SET category = 'misc' "
+        f"WHERE category NOT IN ({placeholders})",
+        tuple(FIXED_CATEGORIES.keys()),
+    )
+    n += cur.rowcount or 0
+    conn.commit()
+    if n:
+        _log.info("Remapped %d memory fact categories to MECE domains", n)
+    return n
 
 
 def _enforce_category_cap(category: str) -> None:
@@ -635,7 +718,14 @@ def _fact_fts_query(query: str) -> str:
 _EXTRACT_PROMPT = """\
 You extract durable personal memory about Yuta from a conversation into a knowledge graph.
 
-Allowed categories (pick one per fact): {categories}
+Allowed categories (MECE life domains — pick exactly one primary home per fact):
+{categories}
+
+Filing resolver (first match wins if ambiguous):
+identity → admin → career → money → home → body → people → craft → play → ops → misc.
+Use misc only when nothing else fits. Do not invent categories.
+ops = how the assistant should behave; identity = who Yuta is.
+career includes PhD/research; admin includes visas/immigration paperwork.
 
 Existing entities (reuse names when the same person/org/place/project):
 {entities}
@@ -651,7 +741,7 @@ Return ONLY JSON:
 {{
   "facts": [
     {{
-      "category": "phd",
+      "category": "career",
       "text": "atomic personal fact about Yuta",
       "entities": [{{"name": "Entity", "type": "person|org|place|project|concept|other", "summary": "optional"}}],
       "supersedes_hint": "optional substring of an old fact this replaces, or null"
@@ -859,7 +949,7 @@ def migrate_topic_blobs_to_graph() -> dict:
         content = (r["content"] or "").strip()
         if not content:
             continue
-        cat = _normalize_category(slug if slug in FIXED_CATEGORIES else "projects")
+        cat = _normalize_category(slug if slug in FIXED_CATEGORIES else "misc")
         prompt = f"""Convert this personal memory note about Yuta into atomic facts for category "{cat}".
 
 Note:

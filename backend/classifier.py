@@ -1,18 +1,20 @@
-"""Classify user messages into fixed memory categories (no inventing new slugs)."""
+"""Classify user messages into MECE life-domain memory categories."""
 from __future__ import annotations
 
 import json
 
 from .llm import anthropic_client, strip_code_fence
-from .memory_graph import FIXED_CATEGORIES
+from .memory_graph import FIXED_CATEGORIES, RESOLVER_ORDER
 from .models import UTILITY_MODEL
 
 
 def _topic_section() -> str:
     lines = [
-        f"- [{slug}] — {desc}" for slug, desc in sorted(FIXED_CATEGORIES.items())
+        f"- [{slug}] — {FIXED_CATEGORIES[slug]}"
+        for slug in RESOLVER_ORDER
+        if slug in FIXED_CATEGORIES
     ]
-    return "Categories:\n" + "\n".join(lines)
+    return "Categories (MECE life domains):\n" + "\n".join(lines)
 
 
 _PROMPT = """\
@@ -20,13 +22,21 @@ You classify a user message into personal-memory categories for Yuta.
 
 {topic_section}
 
+Resolver (if ambiguous, pick the earliest that fits):
+identity → admin → career → money → home → body → people → craft → play → ops → misc
+Rules:
+- career = PhD / research / jobs; admin = visas / immigration / government paperwork
+- ops = how the assistant should behave; identity = who Yuta is
+- misc only if nothing else fits
+- Do NOT invent new category slugs
+
 Message: {message}
 
 Reply with ONLY a JSON object:
-- "relevant": array of category slugs from the list above that apply (0–4 items)
-- "new_topic": always null (new categories are not allowed)
+- "relevant": array of category slugs from the list above (0–4 items)
+- "new_topic": always null
 
-Example: {{"relevant": ["phd", "finance"], "new_topic": null}}
+Example: {{"relevant": ["career", "admin"], "new_topic": null}}
 """
 
 
@@ -51,7 +61,6 @@ def classify(message: str) -> tuple[list[str], str | None]:
         data = json.loads(text)
         allowed = set(topics)
         relevant = [t for t in data.get("relevant", []) if t in allowed]
-        # Light semantic boost via fact embeddings is done at retrieve time.
         return relevant, None
     except Exception:
         return [], None

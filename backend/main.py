@@ -139,7 +139,7 @@ Format responses in Markdown. Use LaTeX for all mathematics \
 
 To explicitly save a fact to memory mid-response, write:
 [[SAVE:category:The fact to save.]]
-Categories: profile, phd, finance, immigration, housing, projects, health, preferences.
+Categories (MECE): identity, career, money, admin, home, body, people, craft, play, ops, misc.
 Use sparingly — only for personal facts about Yuta (preferences, decisions, plans, experiences). \
 Never save general knowledge, definitions, or facts that could be looked up online.
 
@@ -698,7 +698,7 @@ def chat_stream(req: ChatRequest):
         forced = set(mentioned)
         relevant_topics = list(forced | set(relevant_topics))
 
-        update_topics = list(relevant_topics) or ["profile", "preferences"]
+        update_topics = list(relevant_topics) or ["identity", "ops"]
         from .memory_graph import retrieve_memory
         context = retrieve_memory(req.message, categories=relevant_topics or None)
         api_messages, summary = get_api_messages(session_id)
@@ -984,10 +984,13 @@ def chat_stream(req: ChatRequest):
 
     def _save_explicit(explicit_saves, all_topics, new_topic):
         """Persist inline [[SAVE:category:fact]] markers into the knowledge graph."""
-        from .memory_graph import FIXED_CATEGORIES, save_explicit_fact
-        valid = set(all_topics) | set(FIXED_CATEGORIES) | ({new_topic} if new_topic else set())
+        # Accept legacy [[SAVE:phd:...]] aliases via normalize in save_explicit_fact.
+        from .memory_graph import CATEGORY_ALIASES, FIXED_CATEGORIES, save_explicit_fact
+        valid = set(all_topics) | set(FIXED_CATEGORIES) | set(CATEGORY_ALIASES) | (
+            {new_topic} if new_topic else set()
+        )
         for slug, fact in explicit_saves:
-            if slug in valid or slug in FIXED_CATEGORIES:
+            if slug in valid or slug in FIXED_CATEGORIES or slug in CATEGORY_ALIASES:
                 save_explicit_fact(slug, fact)
 
     def generate_gemini():
