@@ -216,14 +216,29 @@ function formatCost(usd: number): string {
 }
 
 const AGENT_ORDER = MOA_AGENTS.map((a) => a.persona);
-const AGENT_ICON: Record<string, string> = { Advocate: "💡", Skeptic: "🔍", Minimalist: "⚡" };
+const AGENT_COUNT = MOA_AGENTS.length;
+
+type MoADraft = { persona: string; text: string; model?: string; done?: boolean; confidence?: number };
 
 function draftModelLabel(draft: { persona: string; model?: string }): string {
   const id = draft.model || moaAgentModel(draft.persona);
   return id ? modelShortLabel(id) : "";
 }
 
-function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: string; model?: string; done?: boolean }[]; streaming: boolean }) {
+function formatConfidence(c: number | undefined): string | null {
+  if (c == null || Number.isNaN(c)) return null;
+  return `${Math.round(c * 100)}%`;
+}
+
+function MoADrafts({
+  drafts,
+  streaming,
+  synthesizing,
+}: {
+  drafts: MoADraft[];
+  streaming: boolean;
+  synthesizing?: boolean;
+}) {
   const [open, setOpen] = useState(true);
   const userToggled = useRef(false);
 
@@ -237,53 +252,109 @@ function MoADrafts({ drafts, streaming }: { drafts: { persona: string; text: str
   }
 
   const doneCnt = drafts.filter((d) => d.done).length;
-  const currentAgent = drafts.find((d) => !d.done);
-  const label = streaming && doneCnt < 3
-    ? currentAgent
-      ? `Agent ${doneCnt + 1}/3 · ${currentAgent.persona} (${draftModelLabel(currentAgent)})…`
-      : `Starting agent ${doneCnt + 1}/3…`
-    : `Agent discussion · ${drafts.length} responses · ${moaPipelineLabel()}`;
+  const writingCnt = drafts.filter((d) => !d.done && d.text).length;
+  const proposing = streaming && !synthesizing && doneCnt < AGENT_COUNT;
+
+  let phaseLabel: string;
+  if (synthesizing && streaming) {
+    phaseLabel = "Synthesizing…";
+  } else if (proposing) {
+    phaseLabel = `Proposing (${doneCnt}/${AGENT_COUNT})`;
+  } else if (streaming) {
+    phaseLabel = `Proposing (${doneCnt}/${AGENT_COUNT})`;
+  } else {
+    const confParts = AGENT_ORDER.map((name) => {
+      const d = drafts.find((x) => x.persona === name);
+      const c = formatConfidence(d?.confidence);
+      return c ? `${name} ${c}` : name;
+    }).filter((_, i) => drafts.some((d) => d.persona === AGENT_ORDER[i]));
+    phaseLabel = confParts.length
+      ? `Discussion · ${confParts.join(" · ")}`
+      : `Discussion · ${drafts.length} responses`;
+  }
 
   return (
-    <div className="moa-drafts">
+    <div className={`moa-drafts${streaming ? " moa-drafts--live" : ""}`}>
       <button className="moa-drafts-toggle" onClick={handleToggle} type="button">
         <span className={`moa-drafts-chevron${open ? " open" : ""}`}>›</span>
-        <span className="moa-drafts-label">{label}</span>
+        <span className="moa-drafts-label">{phaseLabel}</span>
+        {proposing && writingCnt > 0 && (
+          <span className="moa-drafts-phase">live</span>
+        )}
+        {synthesizing && streaming && (
+          <span className="moa-drafts-phase moa-drafts-phase--synth">merge</span>
+        )}
       </button>
       {open && (
-        <div className="moa-drafts-body">
+        <div className="moa-drafts-grid">
           {AGENT_ORDER.map((name) => {
             const d = drafts.find((x) => x.persona === name);
+            const roleClass = `moa-role--${name.toLowerCase()}`;
             if (!d) {
-              const modelId = moaAgentModel(name);
-              return streaming ? (
-                <div key={name} className="moa-draft-item moa-draft-item--pending">
-                  <span className="status-dot" />
-                  <span className="moa-draft-pending-name">
-                    {AGENT_ICON[name]} {name}
-                    {modelId && <span className="moa-draft-model">{modelShortLabel(modelId)}</span>}
-                    {" "}starting…
-                  </span>
+              if (!streaming) return null;
+              return (
+                <div key={name} className={`moa-draft-card moa-draft-card--pending ${roleClass}`}>
+                  <div className="moa-draft-card-head">
+                    <span className="moa-draft-role">{name}</span>
+                    <span className="moa-draft-status">waiting</span>
+                  </div>
+                  <div className="moa-draft-card-body moa-draft-card-body--empty">
+                    <span className="status-dot" />
+                    Starting…
+                  </div>
                 </div>
-              ) : null;
+              );
             }
+            const conf = formatConfidence(d.confidence);
+            const status = d.done ? "done" : d.text ? "writing" : "waiting";
             return (
-              <div key={name} className="moa-draft-item">
-                <div className="moa-draft-persona">
-                  <span>{AGENT_ICON[name] ?? "·"}</span>
-                  {name}
-                  {draftModelLabel(d) && (
-                    <span className="moa-draft-model">{draftModelLabel(d)}</span>
-                  )}
-                  {!d.done && <WaitingIndicator label="Writing" size="sm" className="moa-agent-streaming" />}
+              <div
+                key={name}
+                className={`moa-draft-card ${roleClass}${d.done ? " moa-draft-card--done" : ""}${!d.done && d.text ? " moa-draft-card--writing" : ""}`}
+              >
+                <div className="moa-draft-card-head">
+                  <span className="moa-draft-role">{name}</span>
+                  <div className="moa-draft-card-meta">
+                    {conf && <span className="moa-draft-confidence" title="Self-reported confidence">{conf}</span>}
+                    {draftModelLabel(d) && (
+                      <span className="moa-draft-model">{draftModelLabel(d)}</span>
+                    )}
+                    <span className={`moa-draft-status moa-draft-status--${status}`}>
+                      {status === "writing" ? (
+                        <WaitingIndicator label="Writing" size="sm" className="moa-agent-streaming" />
+                      ) : (
+                        status
+                      )}
+                    </span>
+                  </div>
                 </div>
-                <div className="moa-draft-text">
-                  {d.text}
-                  {!d.done && <span className="cursor" />}
+                <div className="moa-draft-card-body">
+                  {d.text || (streaming ? "" : "—")}
+                  {!d.done && d.text && <span className="cursor" />}
                 </div>
               </div>
             );
           })}
+          {/* Legacy personas (e.g. Minimalist) from older MoA runs */}
+          {drafts
+            .filter((d) => !AGENT_ORDER.includes(d.persona))
+            .map((d) => {
+              const conf = formatConfidence(d.confidence);
+              return (
+                <div key={d.persona} className="moa-draft-card moa-draft-card--done">
+                  <div className="moa-draft-card-head">
+                    <span className="moa-draft-role">{d.persona}</span>
+                    <div className="moa-draft-card-meta">
+                      {conf && <span className="moa-draft-confidence">{conf}</span>}
+                      {draftModelLabel(d) && (
+                        <span className="moa-draft-model">{draftModelLabel(d)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="moa-draft-card-body">{d.text}</div>
+                </div>
+              );
+            })}
         </div>
       )}
     </div>
@@ -381,7 +452,11 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
         ) : (
           <>
             {moaDrafts && moaDrafts.length > 0 && (
-              <MoADrafts drafts={moaDrafts} streaming={!!streaming} />
+              <MoADrafts
+                drafts={moaDrafts}
+                streaming={!!streaming}
+                synthesizing={status === "moa_synthesizing"}
+              />
             )}
             {(status === "searching" || status === "reading_email" || status === "moa_synthesizing") && !content && <StatusLine status={status} />}
             {status === "moa_brainstorm" && (!moaDrafts || moaDrafts.length === 0) && !content && <StatusLine status={status} />}
@@ -454,7 +529,7 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
                 title={model === "moa" ? moaPipelineLabel() : "Model used"}
               >
                 {model === "moa"
-                  ? `Multi → ${modelShortLabel(MOA_SYNTHESIS_MODEL)}`
+                  ? `Self-MoA → ${modelShortLabel(MOA_SYNTHESIS_MODEL)}`
                   : modelLabel(model)}
               </span>
             )}

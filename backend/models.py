@@ -95,8 +95,17 @@ UTILITY_MODEL = "claude-haiku-4-5-20251001"
 # Vision + document extraction for attachments (Gemini native multimodal).
 FILE_EXTRACTION_MODEL = "gemini-3.5-flash"
 
-# Multi-agent (MoA) pipeline — keep in sync with frontend/src/lib/models.ts MOA_*.
-MOA_SYNTHESIS_MODEL = "claude-sonnet-5"
+# Self-MoA pipeline — keep in sync with frontend/src/lib/models.ts MOA_*.
+# All proposers + synthesizer use the same strong model (GLM); diversity comes
+# from role prompts + temperature, not vendor mix. See docs/moa-research-memo.md.
+MOA_SYNTHESIS_MODEL = "glm-5.2"
+MOA_GLM_API_MODEL = "zai/glm-5.2"
+
+MOA_CONFIDENCE_FOOTER = (
+    "End your response with a single line exactly in this form (0–1 calibrated belief "
+    "that your recommendation is the right call for Yuta):\n"
+    "Confidence: 0.XX"
+)
 
 
 @dataclass(frozen=True)
@@ -111,29 +120,33 @@ class MoAAgentDef:
 MOA_AGENTS: tuple[MoAAgentDef, ...] = (
     MoAAgentDef(
         "Advocate",
-        "gemini-3.5-flash",
-        PROVIDER_GEMINI,
-        0.8,
-        "Give your best recommendation: what should Yuta do and why? Cover relevant context "
-        "and tradeoffs, then state a clear top recommendation.",
+        "glm-5.2",
+        PROVIDER_GLM,
+        0.7,
+        "You are the Advocate. Independently give your best recommendation: what should Yuta "
+        "do and why? Cover relevant context and tradeoffs, then state a clear top recommendation. "
+        "Do not wait for or refer to other agents — you write in parallel with them.",
     ),
     MoAAgentDef(
         "Skeptic",
         "glm-5.2",
         PROVIDER_GLM,
         1.0,
-        "Stress-test the Advocate's recommendation. Identify wrong assumptions, risks, failure "
-        "modes, and overlooked alternatives. If the recommendation is flawed, argue for a "
-        "different approach — do not merely add caveats. If you agree on the conclusion, you "
-        "must still surface at least one non-obvious risk or alternative they underweighted.",
+        "You are the Skeptic. Independently stress-test the decision space: identify wrong "
+        "assumptions, risks, failure modes, and overlooked alternatives. Argue for a different "
+        "approach if the obvious recommendation looks flawed — do not merely add caveats. "
+        "If you endorse the common-sense path, you must still surface at least one non-obvious "
+        "risk or alternative. Do not wait for or refer to other agents — you write in parallel.",
     ),
     MoAAgentDef(
-        "Minimalist",
-        UTILITY_MODEL,
-        PROVIDER_ANTHROPIC,
-        0.7,
-        "Given the debate above, what is the smallest concrete action Yuta can take this week "
-        "that moves the needle? What can be deferred or skipped? Push back on over-planning.",
+        "Operator",
+        "glm-5.2",
+        PROVIDER_GLM,
+        0.6,
+        "You are the Operator. Independently plan under real constraints: time, money, energy, "
+        "and Yuta's actual life context. What is feasible this week vs later? Push back on "
+        "over-planning and fantasy timelines. End with a concrete feasible next step. "
+        "Do not wait for or refer to other agents — you write in parallel with them.",
     ),
 )
 

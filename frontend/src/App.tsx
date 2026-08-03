@@ -224,7 +224,7 @@ export default function App() {
     },
     {
       id: "toggle-moa",
-      label: multiAgent ? "Disable multi-agent" : "Enable multi-agent",
+      label: multiAgent ? "Disable Self-MoA" : "Enable Self-MoA",
       group: "Actions",
       run: () => handleMultiAgentChange(!multiAgent),
     },

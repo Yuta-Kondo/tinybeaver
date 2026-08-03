@@ -26,13 +26,13 @@ export const MODELS: ModelOption[] = [
 /** Default model — must match backend `DEFAULT_MODEL`. */
 export const DEFAULT_MODEL = "claude-sonnet-5";
 
-/** MoA pipeline — keep in sync with backend/models.py MOA_* */
-export const MOA_SYNTHESIS_MODEL = "claude-sonnet-5";
+/** Self-MoA pipeline — keep in sync with backend/models.py MOA_* */
+export const MOA_SYNTHESIS_MODEL = "glm-5.2";
 
 export const MOA_AGENTS = [
-  { persona: "Advocate", model: "gemini-3.5-flash" },
+  { persona: "Advocate", model: "glm-5.2" },
   { persona: "Skeptic", model: "glm-5.2" },
-  { persona: "Minimalist", model: "claude-haiku-4-5-20251001" },
+  { persona: "Operator", model: "glm-5.2" },
 ] as const;
 
 /** Short display name, e.g. "Flash 3.5" or "Sonnet 5". */
@@ -44,8 +44,8 @@ export function modelShortLabel(id: string): string {
 
 /** One-line summary of the full MoA pipeline for tooltips. */
 export function moaPipelineLabel(): string {
-  const agents = MOA_AGENTS.map((a) => modelShortLabel(a.model)).join(" · ");
-  return `${agents} → ${modelShortLabel(MOA_SYNTHESIS_MODEL)}`;
+  const roles = MOA_AGENTS.map((a) => a.persona).join(" · ");
+  return `Self-MoA · GLM (${roles})`;
 }
 
 /** Model id for a MoA persona (falls back to empty string). */
@@ -76,7 +76,7 @@ export function findModel(id: string): ModelOption {
  * Handles special "moa" label plus the standard models.
  */
 export function modelLabel(id: string): string {
-  if (id === "moa") return "Multi";
+  if (id === "moa") return "Self-MoA";
   const opt = MODELS.find((m) => m.id === id);
   if (opt) return opt.name;
   // Backwards-compatible fallback for ids not in the registry.

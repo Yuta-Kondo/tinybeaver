@@ -72,7 +72,7 @@ export const WAIT_LABELS = {
   searching: "Searching the web…",
   readingEmail: "Reading emails…",
   memory: "Saving to memory…",
-  moaBrainstorm: "Consulting 3 agents…",
+  moaBrainstorm: "Agents proposing in parallel…",
   moaSynthesize: "Synthesizing answer…",
   fileRead: "Reading with Flash…",
   session: "Loading conversation…",

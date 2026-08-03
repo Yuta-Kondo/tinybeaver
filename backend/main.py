@@ -54,6 +54,8 @@ from .models import (
     DEFAULT_MODEL,
     MODELS,
     MOA_AGENTS,
+    MOA_CONFIDENCE_FOOTER,
+    MOA_GLM_API_MODEL,
     MOA_SYNTHESIS_MODEL,
     PROVIDER_ANTHROPIC,
     PROVIDER_GEMINI,
@@ -272,23 +274,24 @@ def _reindex_topic_embedding(slug: str, content: str, description: str = "") -> 
     save_topic_embedding(slug, embed_bytes(f"{slug} {description} {content}".strip()))
 
 
-def _moa_agents_for_run() -> list:
-    """Return MoA agents, falling back Skeptic to Haiku when ZAI_API_KEY is missing."""
-    from .models import MoAAgentDef
+_MOA_CONFIDENCE_RE = re.compile(r"Confidence:\s*([01](?:\.\d+)?)\s*$", re.IGNORECASE | re.MULTILINE)
 
-    active: list[MoAAgentDef] = []
-    for agent in MOA_AGENTS:
-        if agent.provider == PROVIDER_GLM and not os.getenv("ZAI_API_KEY"):
-            active.append(MoAAgentDef(
-                agent.persona,
-                UTILITY_MODEL,
-                PROVIDER_ANTHROPIC,
-                agent.temperature,
-                agent.instruction + " (GLM unavailable — you are the backup skeptic on Haiku.)",
-            ))
-        else:
-            active.append(agent)
-    return active
+
+def _parse_moa_confidence(text: str) -> float:
+    """Extract trailing Confidence: 0.XX from a proposer draft; default 0.5."""
+    matches = list(_MOA_CONFIDENCE_RE.finditer(text or ""))
+    if not matches:
+        return 0.5
+    try:
+        v = float(matches[-1].group(1))
+    except ValueError:
+        return 0.5
+    return max(0.0, min(1.0, v))
+
+
+def _moa_agents_for_run() -> list:
+    """Return Self-MoA agents (all GLM). Caller must ensure ZAI_API_KEY is set."""
+    return list(MOA_AGENTS)
 
 
 def _parse_mentions(message: str, all_topics: list[str]) -> list[str]:
@@ -1073,9 +1076,12 @@ def chat_stream(req: ChatRequest):
         )
 
     def generate_moa():
-        """MoA: Advocate (Flash) → Skeptic (GLM/Haiku) → Minimalist (Haiku) → Sonnet synthesis."""
-        if not os.getenv("GOOGLE_API_KEY"):
-            yield sse({"type": "error", "message": "GOOGLE_API_KEY not configured"})
+        """Self-MoA: parallel GLM proposers (Advocate / Skeptic / Operator) → GLM synthesis."""
+        import queue
+        from concurrent.futures import ThreadPoolExecutor
+
+        if not os.getenv("ZAI_API_KEY"):
+            yield sse({"type": "error", "message": "ZAI_API_KEY not configured (required for Self-MoA)"})
             return
 
         moa_agents = _moa_agents_for_run()
@@ -1092,134 +1098,119 @@ def chat_stream(req: ChatRequest):
         yield sse({"type": "moa_brainstorm"})
 
         system_str = flatten_system(system)
-
-        drafts: list[tuple[str, str, str]] = []
         agents_cost = prefetch_cost
+        event_q: queue.Queue = queue.Queue()
+        # persona -> {text, model, in_tok, out_tok, error}
+        results: dict[str, dict] = {}
 
-        for agent_idx, agent in enumerate(moa_agents):
-            persona, model_id, provider, temperature, instruction = (
-                agent.persona,
-                agent.model,
-                agent.provider,
-                agent.temperature,
-                agent.instruction,
+        def _run_proposer(agent) -> None:
+            persona = agent.persona
+            model_id = agent.model
+            agent_system = (
+                f"{system_str}\n\n"
+                f"You are one of {n_agents} agents proposing in parallel "
+                f"(roles: {', '.join(a.persona for a in moa_agents)}). "
+                f"You do not see the others' drafts.\n\n"
+                f"Your role ({persona}): {agent.instruction}\n\n"
+                f"{MOA_CONFIDENCE_FOOTER}"
             )
-            yield sse({"type": "moa_agent_start", "moa_persona": persona, "moa_model": model_id})
-            if drafts:
-                prior = "\n\n".join(
-                    f"[{p} — Agent {i + 1}]\n{t}"
-                    for i, (p, t, _) in enumerate(drafts)
-                )
-                agent_system = (
-                    f"{system_str}\n\n"
-                    f"You are Agent {agent_idx + 1} of {n_agents} in a multi-agent discussion. "
-                    f"The agents before you have already responded:\n\n{prior}\n\n"
-                    f"Your role ({persona}): {instruction}"
-                )
-            else:
-                agent_system = (
-                    f"{system_str}\n\n"
-                    f"You are Agent 1 of {n_agents} in a multi-agent discussion. "
-                    f"Your role ({persona}): {instruction}"
-                )
-
+            event_q.put(("start", persona, model_id, None))
             full = ""
             in_tok = out_tok = 0
             try:
-                if provider == PROVIDER_GEMINI:
-                    for text, tin, tout in stream_gemini(
-                        model=model_id,
-                        messages_for_api=messages_for_api,
-                        system=agent_system,
-                        temperature=temperature,
-                    ):
-                        if text:
-                            full += text
-                            yield sse({"type": "moa_draft_delta", "moa_persona": persona, "moa_model": model_id, "moa_text": text})
-                        in_tok, out_tok = tin or in_tok, tout or out_tok
-                elif provider == PROVIDER_GLM:
-                    for text, tin, tout in stream_glm(
-                        model="zai/glm-5.2",
-                        messages_for_api=messages_for_api,
-                        system=agent_system,
-                        temperature=temperature,
-                    ):
-                        if text:
-                            full += text
-                            yield sse({"type": "moa_draft_delta", "moa_persona": persona, "moa_model": model_id, "moa_text": text})
-                        in_tok, out_tok = tin or in_tok, tout or out_tok
-                else:
-                    with _client.messages.stream(
-                        model=model_id,
-                        max_tokens=2048,
-                        system=agent_system,
-                        messages=messages_for_api,
-                        temperature=temperature,
-                    ) as stream:
-                        for event in stream:
-                            if getattr(event, "type", None) == "content_block_delta":
-                                delta = getattr(event, "delta", None)
-                                if delta and getattr(delta, "type", None) == "text_delta":
-                                    full += delta.text
-                                    yield sse({
-                                        "type": "moa_draft_delta",
-                                        "moa_persona": persona,
-                                        "moa_model": model_id,
-                                        "moa_text": delta.text,
-                                    })
-                        try:
-                            final = stream.get_final_message()
-                            in_tok = final.usage.input_tokens
-                            out_tok = final.usage.output_tokens
-                        except Exception:
-                            pass
+                for text, tin, tout in stream_glm(
+                    model=MOA_GLM_API_MODEL,
+                    messages_for_api=messages_for_api,
+                    system=agent_system,
+                    temperature=agent.temperature,
+                ):
+                    if text:
+                        full += text
+                        event_q.put(("delta", persona, model_id, text))
+                    in_tok, out_tok = tin or in_tok, tout or out_tok
             except Exception as e:
                 full = f"[Error: {e}]"
-            agents_cost += _calc_cost(model_id, in_tok, out_tok)
-            drafts.append((persona, full, model_id))
-            yield sse({"type": "moa_agent_done", "moa_persona": persona, "moa_model": model_id})
+            results[persona] = {
+                "text": full,
+                "model": model_id,
+                "in_tok": in_tok,
+                "out_tok": out_tok,
+            }
+            conf = _parse_moa_confidence(full) if not full.startswith("[Error") else None
+            event_q.put(("done", persona, model_id, conf))
 
-        valid = [(p, t, m) for p, t, m in drafts if t and not t.startswith("[Error")]
+        with ThreadPoolExecutor(max_workers=n_agents) as pool:
+            for agent in moa_agents:
+                pool.submit(_run_proposer, agent)
+
+            done_count = 0
+            while done_count < n_agents:
+                kind, persona, model_id, payload = event_q.get()
+                if kind == "start":
+                    yield sse({"type": "moa_agent_start", "moa_persona": persona, "moa_model": model_id})
+                elif kind == "delta":
+                    yield sse({
+                        "type": "moa_draft_delta",
+                        "moa_persona": persona,
+                        "moa_model": model_id,
+                        "moa_text": payload,
+                    })
+                elif kind == "done":
+                    done_evt: dict = {"type": "moa_agent_done", "moa_persona": persona, "moa_model": model_id}
+                    if payload is not None:
+                        done_evt["moa_confidence"] = payload
+                    yield sse(done_evt)
+                    done_count += 1
+
+        # Preserve role order from MOA_AGENTS
+        drafts: list[tuple[str, str, str, float]] = []
+        for agent in moa_agents:
+            r = results.get(agent.persona) or {"text": "[Error: no result]", "model": agent.model, "in_tok": 0, "out_tok": 0}
+            text = r["text"]
+            model_id = r["model"]
+            agents_cost += _calc_cost(model_id, r.get("in_tok", 0), r.get("out_tok", 0))
+            conf = _parse_moa_confidence(text) if not text.startswith("[Error") else 0.5
+            drafts.append((agent.persona, text, model_id, conf))
+
+        valid = [(p, t, m, c) for p, t, m, c in drafts if t and not t.startswith("[Error")]
         if not valid:
-            errors = "; ".join(t for _, t, _ in drafts)
+            errors = "; ".join(t for _, t, _, _ in drafts)
             yield f"data: {json.dumps({'type': 'error', 'message': f'All agents failed: {errors}'})}\n\n"
             return
 
         yield sse({"type": "moa_synthesizing", "moa_model": MOA_SYNTHESIS_MODEL})
 
         draft_block = "\n\n".join(
-            f'<agent name="{p}" index="{i + 1}">\n{t}\n</agent>'
-            for i, (p, t, _) in enumerate(drafts)
+            f'<agent name="{p}" confidence="{c:.2f}">\n{t}\n</agent>'
+            for p, t, _, c in drafts
         )
+        role_names = ", ".join(a.persona for a in moa_agents)
         synthesis_msg = (
-            "Three agents (Advocate, Skeptic, Minimalist) debated the user's query sequentially — "
-            "each read prior responses before writing. Synthesize the best unified answer: keep the "
-            "strongest recommendation, honor valid critiques, preserve concrete next steps, and "
-            "resolve disagreements explicitly rather than averaging them away.\n\n"
+            f"{n_agents} agents ({role_names}) proposed independently in parallel on the user's "
+            "query (Self-MoA). Each ends with a Confidence score (0–1). Synthesize the best "
+            "unified answer: weight agreement by confidence, keep the strongest recommendation, "
+            "honor valid critiques, include one concrete next step, and surface dissent "
+            "explicitly rather than averaging disagreements away. Do not invent Confidence lines "
+            "in your final answer.\n\n"
             f"<user_query>{req.message}</user_query>\n\n"
-            f"<debate>\n{draft_block}\n</debate>"
+            f"<proposals>\n{draft_block}\n</proposals>"
         )
 
         full_text = ""
         chat_cost = 0.0
+        synth_in = synth_out = 0
         try:
-            with _client.messages.stream(
-                model=MOA_SYNTHESIS_MODEL,
-                max_tokens=4096,
+            for text, tin, tout in stream_glm(
+                model=MOA_GLM_API_MODEL,
+                messages_for_api=[{"role": "user", "content": synthesis_msg}],
                 system=system,
-                messages=[{"role": "user", "content": synthesis_msg}],
-            ) as stream:
-                for event in stream:
-                    if getattr(event, "type", None) == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        if delta and getattr(delta, "type", None) == "text_delta":
-                            full_text += delta.text
-                            yield f"data: {json.dumps({'type': 'delta', 'text': delta.text})}\n\n"
-                try:
-                    final = stream.get_final_message()
-                    chat_cost = _calc_cost(MOA_SYNTHESIS_MODEL, final.usage.input_tokens, final.usage.output_tokens)
-                except Exception:
-                    pass
+                temperature=0.5,
+            ):
+                if text:
+                    full_text += text
+                    yield f"data: {json.dumps({'type': 'delta', 'text': text})}\n\n"
+                synth_in, synth_out = tin or synth_in, tout or synth_out
+            chat_cost = _calc_cost(MOA_SYNTHESIS_MODEL, synth_in, synth_out)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
@@ -1235,8 +1226,8 @@ def chat_stream(req: ChatRequest):
                 if slug in set(all_topics) | set(FIXED_CATEGORIES) | ({new_topic} if new_topic else set()):
                     save_explicit_fact(slug, fact)
             drafts_for_db = [
-                {"persona": p, "text": t, "model": m, "done": True}
-                for p, t, m in drafts
+                {"persona": p, "text": t, "model": m, "done": True, "confidence": c}
+                for p, t, m, c in drafts
                 if not t.startswith("[Error")
             ]
             assistant_msg_id = save_message(session_id, "assistant", clean_text, moa_drafts=drafts_for_db or None)
@@ -1257,7 +1248,7 @@ def chat_stream(req: ChatRequest):
         total_cost = round(agents_cost + chat_cost + memory_cost, 6)
         import logging as _log
         _log.getLogger(__name__).info(
-            "MoA cost: agents=%.6f synth=%.6f memory=%.6f total=%.6f",
+            "Self-MoA cost: agents=%.6f synth=%.6f memory=%.6f total=%.6f",
             agents_cost, chat_cost, memory_cost, total_cost,
         )
         cost_bd = {"chat": round(agents_cost + chat_cost, 6), "memory": round(memory_cost, 6)}

@@ -17,8 +17,8 @@ learning about you over time.
   loaded into context and updated after each reply. Browse/edit them in the
   Memory panel; semantic search over topics via embeddings.
 - **Model picker** — Claude Haiku / Sonnet / Opus, Gemini Flash, and GLM, per chat.
-- **Multi-agent (MoA) mode** — a sequential debate of three Gemini agents
-  synthesized by Claude, streamed live per agent.
+- **Multi-agent (Self-MoA) mode** — parallel GLM proposers (Advocate / Skeptic /
+  Operator) with confidence scores, synthesized by GLM; discussion cards stream live.
 - **Private mode** — nothing is written to the DB or memory for that conversation.
 - **Web search** (Tavily) with cited sources, and inline URL fetching.
 - **Attachments** — images (with lightbox), and PDF/CSV/TXT extraction with a
@@ -89,7 +89,8 @@ npm run dev                   # http://localhost:5173, proxies API routes to :80
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | required — Claude |
-| `GOOGLE_API_KEY` | Gemini models / MoA |
+| `GOOGLE_API_KEY` | Gemini models |
+| `ZAI_API_KEY` | GLM models / Self-MoA |
 | `TAVILY_API_KEY` | web search |
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REDIRECT_URI` | Gmail integration |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | web-push notifications |

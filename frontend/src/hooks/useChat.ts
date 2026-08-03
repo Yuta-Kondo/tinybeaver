@@ -22,7 +22,7 @@ export interface Message {
   costBreakdown?: { chat: number; memory: number };
   locations?: GeoLocation[];
   searchSources?: { n: number; url: string; title: string }[];
-  moaDrafts?: { persona: string; text: string; model?: string; done?: boolean }[];
+  moaDrafts?: { persona: string; text: string; model?: string; done?: boolean; confidence?: number }[];
   isError?: boolean;
   stopped?: boolean;
 }
@@ -176,7 +176,12 @@ export function useChat(sessionId: string | null) {
               if (last?.role === "assistant") {
                 const newDrafts = (last.moaDrafts ?? []).map((d) =>
                   d.persona === event.moa_persona
-                    ? { ...d, done: true, model: event.moa_model ?? d.model }
+                    ? {
+                        ...d,
+                        done: true,
+                        model: event.moa_model ?? d.model,
+                        confidence: event.moa_confidence ?? d.confidence,
+                      }
                     : d
                 );
                 copy[copy.length - 1] = { ...last, moaDrafts: newDrafts };

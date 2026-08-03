@@ -45,6 +45,7 @@ export interface StreamEvent {
   moa_persona?: string;
   moa_model?: string;
   moa_text?: string;
+  moa_confidence?: number;
 }
 
 export interface TopicSummary {
@@ -153,7 +154,7 @@ export async function searchSessions(q: string): Promise<SessionSearchResult[]> 
 
 export async function fetchSessionMessages(
   id: string
-): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[]; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
+): Promise<Array<{ id: number; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[]; moa_drafts?: { persona: string; text: string; model?: string; done?: boolean; confidence?: number }[]; model?: string | null; cost_usd?: number | null; cost_breakdown?: { chat: number; memory: number } | null }>> {
   const r = await fetch(`/sessions/${id}/messages`);
   if (!r.ok) throw new Error(`Failed to load messages (${r.status})`);
   const data = await r.json();
