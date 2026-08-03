@@ -215,7 +215,7 @@ function formatCost(usd: number): string {
   return `$${usd.toFixed(4)}`;
 }
 
-const AGENT_ORDER = MOA_AGENTS.map((a) => a.persona);
+const AGENT_ORDER: string[] = MOA_AGENTS.map((a) => a.persona);
 const AGENT_COUNT = MOA_AGENTS.length;
 
 type MoADraft = { persona: string; text: string; model?: string; done?: boolean; confidence?: number };
