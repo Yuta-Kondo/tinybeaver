@@ -3,7 +3,7 @@
 
 export type IconName =
   | "copy" | "check" | "regenerate" | "edit" | "trash"
-  | "thumbUp" | "thumbDown" | "attach" | "send" | "stop" | "close";
+  | "thumbUp" | "thumbDown" | "attach" | "send" | "stop" | "close" | "help";
 
 interface Props {
   name: IconName;
@@ -88,6 +88,14 @@ export default function Icon({ name, size = 15, className }: Props) {
       return (
         <svg {...common} {...STROKE}>
           <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      );
+    case "help":
+      return (
+        <svg {...common} {...STROKE}>
+          <circle cx="8" cy="8" r="5.5" />
+          <path d="M6.4 6.2a1.7 1.7 0 012.9 1.2c0 1.1-.9 1.4-1.3 1.7" />
+          <path d="M8 11.2h.01" />
         </svg>
       );
   }

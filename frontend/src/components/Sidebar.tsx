@@ -14,10 +14,11 @@ interface Props {
   onDelete: (id: string) => void;
   onRenamed: (id: string, title: string) => void;
   onSendToChat: (text: string) => void;
+  onOpenHelp?: () => void;
   isOpen?: boolean;
 }
 
-export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, onRenamed, onSendToChat, isOpen }: Props) {
+export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, onRenamed, onSendToChat, onOpenHelp, isOpen }: Props) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
@@ -82,7 +83,20 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
   return (
     <aside className={`sidebar${isOpen ? " sidebar--open" : ""}`}>
       <div className="sidebar-header">
-        <div className="sidebar-title">tinybeaver</div>
+        <div className="sidebar-title-row">
+          <div className="sidebar-title">tinybeaver</div>
+          {onOpenHelp && (
+            <button
+              type="button"
+              className="sidebar-help-btn"
+              onClick={onOpenHelp}
+              title="Shortcuts & model data"
+              aria-label="Shortcuts and model data"
+            >
+              <Icon name="help" size={15} />
+            </button>
+          )}
+        </div>
         <div className="sidebar-tabs">
           <button className={`tab-btn ${tab === "chats" ? "active" : ""}`} onClick={() => setTab("chats")}>Chats</button>
           <button className={`tab-btn ${tab === "memory" ? "active" : ""}`} onClick={() => setTab("memory")}>Memory</button>
@@ -90,13 +104,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
           <button className={`tab-btn ${tab === "email" ? "active" : ""}`} onClick={() => setTab("email")}>Email</button>
         </div>
         {tab === "chats" && (
-          <>
-            <button className="new-chat-btn" onClick={onNew}>+ New chat</button>
-            <div className="shortcut-bar">
-              <span className="shortcut-item"><kbd className="kbd">⌘⇧O</kbd> <span>new chat</span></span>
-              <span className="shortcut-item"><kbd className="kbd">⌘K</kbd> <span>commands</span></span>
-            </div>
-          </>
+          <button className="new-chat-btn" onClick={onNew}>+ New chat</button>
         )}
       </div>
 

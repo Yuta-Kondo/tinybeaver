@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatView, { type ChatViewHandle } from "./components/ChatView";
 import CommandPalette, { type Command } from "./components/CommandPalette";
+import HelpPanel from "./components/HelpPanel";
 import { useChat } from "./hooks/useChat";
 import { deleteSession, fetchSessions, type SessionInfo } from "./lib/api";
+import { MOD_SHIFT } from "./lib/helpContent";
 import { MODELS, resolveModel } from "./lib/models";
 
 /** Model entries formatted for the command palette: "Sonnet 5", "Haiku 4.5", … */
@@ -59,6 +61,8 @@ export default function App() {
   const [privateMode, setPrivateMode] = useState(false);
   const [privateLocked, setPrivateLocked] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpTab, setHelpTab] = useState<"shortcuts" | "models">("shortcuts");
   const chatViewRef = useRef<ChatViewHandle>(null);
   const sidebarOpenRef = useRef(false);
   const { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession, deleteMessageFromSession } =
@@ -214,8 +218,22 @@ export default function App() {
   }
 
   const paletteCommands: Command[] = [
-    { id: "new-chat", label: "New chat", hint: "⌘⇧O", group: "Actions", run: () => { handleNew(); setSidebarOpen(false); } },
+    { id: "new-chat", label: "New chat", hint: `${MOD_SHIFT}O`, group: "Actions", run: () => { handleNew(); setSidebarOpen(false); } },
     { id: "search", label: "Search chats", hint: "", group: "Actions", run: () => openSidebarTab("chats") },
+    {
+      id: "open-help-shortcuts",
+      label: "Keyboard shortcuts",
+      hint: "",
+      group: "Actions",
+      run: () => { setHelpTab("shortcuts"); setHelpOpen(true); },
+    },
+    {
+      id: "open-help-models",
+      label: "Models & data privacy",
+      hint: "",
+      group: "Actions",
+      run: () => { setHelpTab("models"); setHelpOpen(true); },
+    },
     {
       id: "toggle-private",
       label: privateMode ? "Turn off private mode" : "Turn on private mode",
@@ -266,6 +284,7 @@ export default function App() {
         onDelete={handleDelete}
         onRenamed={handleRenamed}
         onSendToChat={(t) => { handleSendToChat(t); setSidebarOpen(false); }}
+        onOpenHelp={() => { setHelpTab("shortcuts"); setHelpOpen(true); }}
         isOpen={sidebarOpen}
       />
       <ChatView
@@ -296,6 +315,11 @@ export default function App() {
         commands={paletteCommands}
         sessions={sessions}
         onSelectSession={(id) => { handleSelect(id); setSidebarOpen(false); }}
+      />
+      <HelpPanel
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        initialTab={helpTab}
       />
     </div>
   );
