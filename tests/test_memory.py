@@ -45,14 +45,24 @@ def test_save_topic_upsert_content():
     assert t["description"] == "desc1"
 
 
-def test_available_topics_empty():
-    assert available_topics() == []
+def test_available_topics_seeds_fixed_catalog():
+    """A fresh DB is not empty: the closed category catalog is seeded on init.
+
+    `_get_conn()` calls `ensure_fixed_categories()`, so every database starts
+    with the fixed taxonomy. This asserted `== []` back when categories were
+    open-ended and created on demand.
+    """
+    from backend.memory_graph import FIXED_CATEGORIES
+
+    assert available_topics() == sorted(FIXED_CATEGORIES)
 
 
 def test_available_topics_sorted():
     save_topic("zebra", "z")
     save_topic("alpha", "a")
-    assert available_topics() == ["alpha", "zebra"]
+    topics = available_topics()
+    assert topics == sorted(topics)
+    assert {"alpha", "zebra"} <= set(topics)
 
 
 def test_topic_descriptions():
@@ -104,11 +114,22 @@ def test_save_session_upsert_title():
 
 
 def test_list_sessions_ordered():
+    # list_sessions() filters on HAVING COUNT(messages) > 0, so a session with
+    # no messages is deliberately invisible — see test below.
     save_session("a", "A")
+    save_message("a", "user", "hi")
     save_session("b", "B")
+    save_message("b", "user", "hi")
     sessions = list_sessions()
     ids = [s["session_id"] for s in sessions]
     assert "a" in ids and "b" in ids
+
+
+def test_list_sessions_hides_empty_sessions():
+    """An unused "New chat" should not clutter the sidebar."""
+    save_session("ghost", "Never used")
+    assert get_session("ghost") is not None
+    assert "ghost" not in [s["session_id"] for s in list_sessions()]
 
 
 def test_delete_session():

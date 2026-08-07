@@ -2,6 +2,7 @@
 from fastapi.testclient import TestClient
 
 from backend.memory import save_session, save_message, save_topic, save_task
+from backend.memory_graph import FIXED_CATEGORIES, add_fact
 from backend.main import app
 
 client = TestClient(app)
@@ -17,6 +18,7 @@ def test_list_sessions_empty():
 
 def test_list_sessions_with_data():
     save_session("s1", "Hello world")
+    save_message("s1", "user", "hi")  # empty sessions are filtered out
     resp = client.get("/sessions")
     assert resp.status_code == 200
     data = resp.json()
@@ -77,28 +79,54 @@ def test_delete_message():
 
 # ── Topics ───────────────────────────────────────────────────────────────────
 
-def test_list_topics_empty():
-    resp = client.get("/topics")
-    assert resp.status_code == 200
-    assert resp.json()["topics"] == []
-
-
-def test_list_topics():
-    save_topic("finance", "Budget notes", "Money stuff")
+def test_list_topics_seeds_fixed_categories():
+    """/topics lists the closed catalog, each with a zero fact count."""
     resp = client.get("/topics")
     assert resp.status_code == 200
     topics = resp.json()["topics"]
-    assert any(t["slug"] == "finance" for t in topics)
+    assert {t["slug"] for t in topics} == set(FIXED_CATEGORIES)
+    assert all(t["fact_count"] == 0 for t in topics)
+
+
+def test_list_topics_counts_facts():
+    add_fact("money", "Rent is 1500/mo")
+    add_fact("money", "Groceries ~400/mo")
+    topics = client.get("/topics").json()["topics"]
+    money = next(t for t in topics if t["slug"] == "money")
+    assert money["fact_count"] == 2
+
+
+def test_list_topics_ignores_content_only_topics():
+    """Topic rows without facts don't surface — content blobs are legacy."""
+    save_topic("finance", "Budget notes", "Money stuff")
+    topics = client.get("/topics").json()["topics"]
+    assert not any(t["slug"] == "finance" for t in topics)
 
 
 def test_get_topic():
-    save_topic("phd", "Research at McMaster", "PhD notes")
-    resp = client.get("/topics/phd")
+    """`content` is rendered from the fact list, not the legacy content blob."""
+    save_topic("career", "ignored blob", "")
+    add_fact("career", "Starting a PhD at McMaster in Sept 2026")
+    resp = client.get("/topics/career")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["slug"] == "phd"
-    assert data["content"] == "Research at McMaster"
-    assert data["description"] == "PhD notes"
+    assert data["slug"] == "career"
+    assert data["fact_count"] == 1
+    assert data["content"] == "- Starting a PhD at McMaster in Sept 2026"
+
+
+def test_fixed_category_description_is_code_owned():
+    """Descriptions on fixed categories belong to FIXED_CATEGORIES, not the DB.
+
+    `add_fact()` calls `ensure_fixed_categories()`, which re-asserts the
+    catalog description. Anything written by PUT /topics/{slug} is therefore
+    reverted the next time a fact lands in that category.
+    """
+    save_topic("career", "", "Hand-edited description")
+    assert client.get("/topics/career").json()["description"] == "Hand-edited description"
+
+    add_fact("career", "any fact")
+    assert client.get("/topics/career").json()["description"] == FIXED_CATEGORIES["career"]
 
 
 def test_get_topic_not_found():
@@ -106,12 +134,16 @@ def test_get_topic_not_found():
     assert resp.status_code == 404
 
 
-def test_update_topic():
-    save_topic("housing", "Old content")
-    resp = client.put("/topics/housing", json={"content": "New content", "description": ""})
+def test_update_topic_writes_description_only():
+    """PUT /topics/{slug} is description-only; content blobs are never written."""
+    save_topic("home", "", "Old description")
+    resp = client.put(
+        "/topics/home", json={"content": "ignored", "description": "New description"}
+    )
     assert resp.status_code == 200
-    resp2 = client.get("/topics/housing")
-    assert resp2.json()["content"] == "New content"
+    data = client.get("/topics/home").json()
+    assert data["description"] == "New description"
+    assert data["content"] == ""  # no facts added, so nothing to render
 
 
 def test_create_topic_via_post():
