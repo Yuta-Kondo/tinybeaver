@@ -3,7 +3,8 @@
 
 export type IconName =
   | "copy" | "check" | "regenerate" | "edit" | "trash"
-  | "thumbUp" | "thumbDown" | "attach" | "send" | "stop" | "close" | "help";
+  | "thumbUp" | "thumbDown" | "attach" | "send" | "stop" | "close" | "help"
+  | "memory";
 
 interface Props {
   name: IconName;
@@ -88,6 +89,15 @@ export default function Icon({ name, size = 15, className }: Props) {
       return (
         <svg {...common} {...STROKE}>
           <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      );
+    case "memory":
+      // Stacked layers — topics as accumulating strata, not a literal brain.
+      return (
+        <svg {...common} {...STROKE}>
+          <path d="M8 2L2.5 5 8 8l5.5-3z" />
+          <path d="M2.5 8.5L8 11.5l5.5-3" />
+          <path d="M2.5 11.5L8 14.5l5.5-3" />
         </svg>
       );
     case "help":

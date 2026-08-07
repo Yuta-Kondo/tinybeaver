@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { SessionInfo } from "../lib/api";
 
 export interface Command {
@@ -21,6 +22,7 @@ export default function CommandPalette({ open, onClose, commands, sessions, onSe
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -57,6 +59,8 @@ export default function CommandPalette({ open, onClose, commands, sessions, onSe
     item.run();
   }
 
+  useFocusTrap(true, panelRef);
+
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, items.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
@@ -68,8 +72,15 @@ export default function CommandPalette({ open, onClose, commands, sessions, onSe
   let lastGroup = "";
 
   return (
-    <div className="cmdk-backdrop" onClick={onClose}>
-      <div className="cmdk-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="cmdk-backdrop" onClick={onClose} role="presentation">
+      <div
+        ref={panelRef}
+        className="cmdk-panel"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+      >
         <input
           ref={inputRef}
           className="cmdk-input"
@@ -77,8 +88,13 @@ export default function CommandPalette({ open, onClose, commands, sessions, onSe
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="cmdk-listbox"
+          aria-activedescendant={items[active] ? `cmdk-opt-${items[active].id}` : undefined}
+          aria-autocomplete="list"
         />
-        <div className="cmdk-list">
+        <div className="cmdk-list" id="cmdk-listbox" role="listbox">
           {items.length === 0 && <div className="cmdk-empty">No results</div>}
           {items.map((item, i) => {
             const showGroup = item.group !== lastGroup;
@@ -87,6 +103,9 @@ export default function CommandPalette({ open, onClose, commands, sessions, onSe
               <div key={item.id}>
                 {showGroup && <div className="cmdk-group">{item.group}</div>}
                 <div
+                  id={`cmdk-opt-${item.id}`}
+                  role="option"
+                  aria-selected={i === active}
                   className={`cmdk-item${i === active ? " cmdk-item--active" : ""}`}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => exec(i)}

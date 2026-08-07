@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useUndoableAction } from "../hooks/useUndoableAction";
 import {
   type MemoryFact,
   type SearchResult,
@@ -180,16 +181,17 @@ export default function TopicsPanel() {
     }
   }
 
-  async function handleDeleteFact(id: number) {
-    if (!window.confirm("Remove this fact?")) return;
-    try {
+  // Deferred rather than confirmed: the fact disappears at once and the API
+  // call only fires if the undo window closes untouched.
+  const { run: handleDeleteFact, pending: deletingFacts } = useUndoableAction<number>({
+    commit: async (id) => {
       await deleteMemoryFact(id);
       if (selected) await openTopic(selected.slug);
       await loadTopics();
-    } catch {
-      setError("Could not delete fact.");
-    }
-  }
+    },
+    message: () => "Fact removed",
+    onFailed: () => setError("Could not delete fact."),
+  });
 
   async function handleSaveCore() {
     setSaving(true);
@@ -204,6 +206,8 @@ export default function TopicsPanel() {
   }
 
   const inDetail = coreOpen || selected != null;
+  // Facts mid-undo are already gone from the user's point of view.
+  const visibleFacts = facts.filter((f) => !deletingFacts.has(f.id));
 
   const displayList = searchResults
     ? searchResults.map((r) => ({
@@ -362,10 +366,10 @@ export default function TopicsPanel() {
           </header>
 
           <div className="mem-detail-body" ref={factsScrollRef}>
-            {facts.length === 0 && (
+            {visibleFacts.length === 0 && (
               <p className="mem-empty">No facts here yet. Add one below.</p>
             )}
-            {facts.map((f) => (
+            {visibleFacts.map((f) => (
               <article key={f.id} className="mem-fact">
                 {editingId === f.id ? (
                   <>
