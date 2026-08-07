@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { type Task, createTask, deleteTask, fetchTasks, toggleTask } from "../lib/api";
 import Icon from "./Icon";
+import { useUndoableAction } from "../hooks/useUndoableAction";
 import { WaitingIndicator } from "./WaitingIndicator";
 
 const TIMES = [
@@ -100,10 +101,14 @@ export default function TasksPanel() {
     await load();
   }
 
-  async function handleDelete(id: string) {
-    await deleteTask(id);
-    await load();
-  }
+  // Deleting a schedule was previously instant and irreversible.
+  const { run: handleDelete, pending: deletingTasks } = useUndoableAction<string>({
+    commit: async (id) => {
+      await deleteTask(id);
+      await load();
+    },
+    message: () => "Task deleted",
+  });
 
   function formatNextRun(next: string | null) {
     if (!next) return "—";
@@ -112,10 +117,12 @@ export default function TasksPanel() {
     } catch { return next; }
   }
 
+  const visibleTasks = tasks.filter((t) => !deletingTasks.has(t.id));
+
   return (
     <div className="tasks-panel">
       <div className="tasks-header">
-        <span className="tasks-count">{tasks.length} task{tasks.length !== 1 ? "s" : ""}</span>
+        <span className="tasks-count">{visibleTasks.length} task{visibleTasks.length !== 1 ? "s" : ""}</span>
         <button className="tasks-add-btn" onClick={() => { setCreating(true); setError(""); }}>+ New</button>
       </div>
 
@@ -197,10 +204,10 @@ export default function TasksPanel() {
       )}
 
       <div className="task-list">
-        {tasks.length === 0 && !creating && (
+        {visibleTasks.length === 0 && !creating && (
           <p className="tasks-empty">No scheduled tasks yet.<br />Tasks run in background and create new sessions.</p>
         )}
-        {tasks.map((t) => (
+        {visibleTasks.map((t) => (
           <div key={t.id} className={`task-item ${!t.active ? "task-item--inactive" : ""}`}>
             <div className="task-item-main">
               <span className="task-title">{t.title}</span>

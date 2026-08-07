@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import Icon from "./Icon";
 import {
   PROVIDER_PRIVACY,
@@ -17,6 +18,9 @@ interface Props {
 
 export default function HelpPanel({ open, onClose, initialTab = "shortcuts" }: Props) {
   const [tab, setTab] = useState<Tab>(initialTab);
+
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(open, panelRef);
 
   useEffect(() => {
     if (open) setTab(initialTab);
@@ -41,6 +45,7 @@ export default function HelpPanel({ open, onClose, initialTab = "shortcuts" }: P
       <div
         className="help-panel"
         onClick={(e) => e.stopPropagation()}
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label="Help"

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatView, { type ChatViewHandle } from "./components/ChatView";
 import CommandPalette, { type Command } from "./components/CommandPalette";
+import ContextRail from "./components/ContextRail";
 import HelpPanel from "./components/HelpPanel";
 import { useChat } from "./hooks/useChat";
 import { deleteSession, fetchSessions, type SessionInfo } from "./lib/api";
@@ -63,6 +64,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpTab, setHelpTab] = useState<"shortcuts" | "models">("shortcuts");
+  const [railOpen, setRailOpen] = useState(() => localStorage.getItem("contextRail") !== "0");
   const chatViewRef = useRef<ChatViewHandle>(null);
   const sidebarOpenRef = useRef(false);
   const { messages, streaming, loadingSession, sendMessage, resendFromMessage, retryLast, continueMessage, cancel, clear, loadSession, deleteMessageFromSession } =
@@ -308,6 +310,15 @@ export default function App() {
         privateMode={privateMode}
         privateLocked={privateLocked}
         onPrivateModeChange={(v) => { setPrivateMode(v); if (!v) setPrivateLocked(false); }}
+      />
+      <ContextRail
+        messages={messages}
+        open={railOpen}
+        onToggle={() => {
+          const next = !railOpen;
+          setRailOpen(next);
+          localStorage.setItem("contextRail", next ? "1" : "0");
+        }}
       />
       <CommandPalette
         open={paletteOpen}

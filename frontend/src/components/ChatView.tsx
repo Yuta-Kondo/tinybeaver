@@ -8,8 +8,24 @@ import { MODELS, findModel, moaPipelineLabel } from "../lib/models";
 import { ChatSessionSkeleton, WaitingIndicator, WAIT_LABELS } from "./WaitingIndicator";
 import SelectionToolbar from "./SelectionToolbar";
 import DocumentsPanel, { type DocItem } from "./DocumentsPanel";
+import { useToast } from "./Toast";
 
 const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif"]);
+
+/** First-run prompts. Chosen to show what this app does that a plain chatbot
+ *  doesn't — write to memory, recall it later, and reason over your context. */
+const SUGGESTIONS = [
+  "What do you remember about me?",
+  "Help me plan my week",
+  "Summarize what we decided last time",
+];
+
+/** Multi-agent mode is for judgement calls, so the prompts are decisions. */
+const MOA_SUGGESTIONS = [
+  "Should I take this offer or keep looking?",
+  "Stress-test my plan for next month",
+  "What am I not thinking about?",
+];
 
 function docKind(name: string): "image" | "pdf" | "file" {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -20,7 +36,10 @@ function docKind(name: string): "image" | "pdf" | "file" {
 
 function ModelDropdown({ model, onModelChange, disabled }: { model: string; onModelChange: (m: string) => void; disabled: boolean }) {
   const [open, setOpen] = useState(false);
+  // Which row the keyboard is on, independent of which model is selected.
+  const [cursor, setCursor] = useState(() => Math.max(0, MODELS.findIndex((m) => m.id === model)));
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const active = findModel(model);
 
   const close = useCallback(() => setOpen(false), []);
@@ -33,29 +52,72 @@ function ModelDropdown({ model, onModelChange, disabled }: { model: string; onMo
     return () => document.removeEventListener("mousedown", onDown);
   }, [open, close]);
 
+  // Opening always starts on the current model, not wherever the cursor was.
+  useEffect(() => {
+    if (open) setCursor(Math.max(0, MODELS.findIndex((m) => m.id === model)));
+  }, [open, model]);
+
+  function choose(id: string) {
+    onModelChange(id);
+    setOpen(false);
+    btnRef.current?.focus();
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (disabled) return;
+    if (!open) {
+      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); setCursor((c) => Math.min(c + 1, MODELS.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setCursor((c) => Math.max(c - 1, 0)); }
+    else if (e.key === "Home") { e.preventDefault(); setCursor(0); }
+    else if (e.key === "End") { e.preventDefault(); setCursor(MODELS.length - 1); }
+    else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(MODELS[cursor].id); }
+    else if (e.key === "Escape") { e.preventDefault(); setOpen(false); btnRef.current?.focus(); }
+    else if (e.key === "Tab") { setOpen(false); }
+  }
+
   return (
-    <div className="model-dropdown" ref={ref}>
+    <div className="model-dropdown" ref={ref} onKeyDown={onKeyDown}>
       <button
+        ref={btnRef}
         className="model-dropdown-btn"
         onClick={() => !disabled && setOpen((o) => !o)}
         type="button"
         disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Model: ${active.name} ${active.version}`}
       >
         <span className={`model-dropdown-dot model-dropdown-dot--${active.provider}`} />
         <span className="model-dropdown-name">{active.name}</span>
         <span className="model-dropdown-version">{active.version}</span>
-        <svg className={`model-dropdown-chevron${open ? " open" : ""}`} viewBox="0 0 10 6" fill="none">
+        <svg className={`model-dropdown-chevron${open ? " open" : ""}`} viewBox="0 0 10 6" fill="none" aria-hidden="true">
           <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </button>
 
       {open && (
-        <div className="model-dropdown-menu">
-          {MODELS.map((m) => (
+        <div
+          className="model-dropdown-menu"
+          role="listbox"
+          aria-label="Model"
+          aria-activedescendant={`model-opt-${MODELS[cursor]?.id}`}
+        >
+          {MODELS.map((m, i) => (
             <button
               key={m.id}
-              className={`model-option${model === m.id ? " model-option--active" : ""}`}
-              onClick={() => { onModelChange(m.id); setOpen(false); }}
+              id={`model-opt-${m.id}`}
+              role="option"
+              aria-selected={model === m.id}
+              tabIndex={-1}
+              className={`model-option${model === m.id ? " model-option--active" : ""}${i === cursor ? " model-option--cursor" : ""}`}
+              onClick={() => choose(m.id)}
+              onMouseEnter={() => setCursor(i)}
               type="button"
             >
               <span className={`model-dropdown-dot model-dropdown-dot--${m.provider}`} />
@@ -65,7 +127,7 @@ function ModelDropdown({ model, onModelChange, disabled }: { model: string; onMo
                 </span>
                 <span className="model-option-desc">{m.desc}</span>
               </span>
-              {model === m.id && <span className="model-option-check">✓</span>}
+              {model === m.id && <span className="model-option-check" aria-hidden="true">✓</span>}
             </button>
           ))}
         </div>
@@ -126,6 +188,7 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
   const [topicSlugs, setTopicSlugs] = useState<string[]>([]);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
+  const toast = useToast();
 
   useEffect(() => {
     fetchTopics()
@@ -250,7 +313,10 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
       setDocuments((d) => d.map((it) => (it.key === key ? { ...doc, key, loading: false } : it)));
     } catch (e: any) {
       setDocuments((d) => d.filter((it) => it.key !== key));
-      alert(`Could not add "${file.name}": ${e.message}`);
+      toast.error(`Couldn't add “${file.name}” — ${e.message}`, {
+        label: "Retry",
+        run: () => processFile(file),
+      });
     }
   }
 
@@ -288,7 +354,10 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         d.map((it) => (it.id === id ? { ...it, ...doc, key: it.key, loading: false } : it))
       );
     } catch (e: any) {
-      alert(`Could not reindex: ${e.message}`);
+      toast.error(`Couldn't reindex — ${e.message}`, {
+        label: "Retry",
+        run: () => reindexDocument(id),
+      });
     }
   }
 
@@ -511,12 +580,45 @@ const ChatView = forwardRef<ChatViewHandle, Props>(function ChatView({ messages,
         </div>
       )}
 
-      <div className="messages" ref={scrollRef} onScroll={handleScroll}>
+      <div
+        className="messages"
+        ref={scrollRef}
+        onScroll={handleScroll}
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-busy={streaming}
+      >
         {loadingSession ? (
           <ChatSessionSkeleton />
         ) : messages.length === 0 ? (
             <div className="empty-state">
-              <img src="/favicon.png" alt="tinybeaver" className={`empty-state-logo${privateMode ? " empty-state-logo--private" : ""}`} />
+              <img src="/favicon.png" alt="" className={`empty-state-logo${privateMode ? " empty-state-logo--private" : ""}`} />
+              <h2>{privateMode ? "Private chat" : "What's on your mind?"}</h2>
+              <p>
+                {privateMode
+                  ? "Nothing here is saved to memory or the database."
+                  : multiAgent
+                    ? "Three agents will debate your question, then merge their answers."
+                    : "I remember what matters across chats — ask me anything."}
+              </p>
+              {!privateMode && (
+                <div className="empty-suggestions">
+                  {(multiAgent ? MOA_SUGGESTIONS : SUGGESTIONS).map((s) => (
+                    <button
+                      key={s}
+                      className="empty-suggestion"
+                      type="button"
+                      onClick={() => {
+                        setDraft(s);
+                        textareaRef.current?.focus();
+                      }}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
         ) : (
           messages.map((m, i) => {

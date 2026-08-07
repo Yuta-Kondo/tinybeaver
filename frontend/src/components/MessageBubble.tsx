@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -225,9 +226,22 @@ function draftModelLabel(draft: { persona: string; model?: string }): string {
   return id ? modelShortLabel(id) : "";
 }
 
-function formatConfidence(c: number | undefined): string | null {
-  if (c == null || Number.isNaN(c)) return null;
-  return `${Math.round(c * 100)}%`;
+/** Confidence rendered as a meter — comparable across columns at a glance,
+ *  which a bare percentage never was. Absent when the model dropped the
+ *  `Confidence:` footer (small models do this often; see moa-research-memo). */
+function ConfidenceMeter({ value }: { value: number }) {
+  const pct = Math.round(value * 100);
+  return (
+    <span
+      className="moa-confidence"
+      title={`Self-reported confidence: ${pct}% (not calibrated)`}
+    >
+      <span className="moa-confidence-track">
+        <span className="moa-confidence-fill" style={{ width: `${pct}%` }} />
+      </span>
+      <span className="moa-confidence-value">{pct}%</span>
+    </span>
+  );
 }
 
 function MoADrafts({
@@ -239,45 +253,48 @@ function MoADrafts({
   streaming: boolean;
   synthesizing?: boolean;
 }) {
+  // Stays open once finished: the drafts are the evidence for the synthesis
+  // below them, so hiding them the moment they matter defeats the mode.
   const [open, setOpen] = useState(true);
-  const userToggled = useRef(false);
-
-  useEffect(() => {
-    if (!streaming && !userToggled.current) setOpen(false);
-  }, [streaming]);
-
-  function handleToggle() {
-    userToggled.current = true;
-    setOpen((o) => !o);
-  }
 
   const doneCnt = drafts.filter((d) => d.done).length;
   const writingCnt = drafts.filter((d) => !d.done && d.text).length;
   const proposing = streaming && !synthesizing && doneCnt < AGENT_COUNT;
+  const finished = !streaming && doneCnt > 0;
 
   let phaseLabel: string;
   if (synthesizing && streaming) {
-    phaseLabel = "Synthesizing…";
-  } else if (proposing) {
-    phaseLabel = `Proposing (${doneCnt}/${AGENT_COUNT})`;
+    phaseLabel = "Merging three views…";
   } else if (streaming) {
-    phaseLabel = `Proposing (${doneCnt}/${AGENT_COUNT})`;
+    phaseLabel = proposing && writingCnt > 0 ? "Three agents are drafting…" : "Starting three agents…";
   } else {
-    const confParts = AGENT_ORDER.map((name) => {
-      const d = drafts.find((x) => x.persona === name);
-      const c = formatConfidence(d?.confidence);
-      return c ? `${name} ${c}` : name;
-    }).filter((_, i) => drafts.some((d) => d.persona === AGENT_ORDER[i]));
-    phaseLabel = confParts.length
-      ? `Discussion · ${confParts.join(" · ")}`
-      : `Discussion · ${drafts.length} responses`;
+    phaseLabel = "Discussion";
   }
 
   return (
     <div className={`moa-drafts${streaming ? " moa-drafts--live" : ""}`}>
-      <button className="moa-drafts-toggle" onClick={handleToggle} type="button">
+      <button
+        className="moa-drafts-toggle"
+        onClick={() => setOpen((o) => !o)}
+        type="button"
+        aria-expanded={open}
+      >
         <span className={`moa-drafts-chevron${open ? " open" : ""}`}>›</span>
         <span className="moa-drafts-label">{phaseLabel}</span>
+        <span className="moa-progress" aria-hidden="true">
+          {AGENT_ORDER.map((name) => {
+            const d = drafts.find((x) => x.persona === name);
+            const state = d?.done ? "done" : d?.text ? "writing" : "idle";
+            return (
+              <span
+                key={name}
+                className={`moa-progress-dot moa-role--${name.toLowerCase()}${
+                  state === "idle" ? "" : ` moa-progress-dot--${state}`
+                }`}
+              />
+            );
+          })}
+        </span>
         {proposing && writingCnt > 0 && (
           <span className="moa-drafts-phase">live</span>
         )}
@@ -305,7 +322,6 @@ function MoADrafts({
                 </div>
               );
             }
-            const conf = formatConfidence(d.confidence);
             const status = d.done ? "done" : d.text ? "writing" : "waiting";
             return (
               <div
@@ -315,17 +331,16 @@ function MoADrafts({
                 <div className="moa-draft-card-head">
                   <span className="moa-draft-role">{name}</span>
                   <div className="moa-draft-card-meta">
-                    {conf && <span className="moa-draft-confidence" title="Self-reported confidence">{conf}</span>}
-                    {draftModelLabel(d) && (
-                      <span className="moa-draft-model">{draftModelLabel(d)}</span>
+                    {d.confidence != null && !Number.isNaN(d.confidence) ? (
+                      <ConfidenceMeter value={d.confidence} />
+                    ) : d.done ? (
+                      <span className="moa-draft-status" title="This agent did not report a confidence score">
+                        no score
+                      </span>
+                    ) : null}
+                    {status === "writing" && (
+                      <WaitingIndicator label="" size="sm" className="moa-agent-streaming" />
                     )}
-                    <span className={`moa-draft-status moa-draft-status--${status}`}>
-                      {status === "writing" ? (
-                        <WaitingIndicator label="Writing" size="sm" className="moa-agent-streaming" />
-                      ) : (
-                        status
-                      )}
-                    </span>
                   </div>
                 </div>
                 <div className="moa-draft-card-body">
@@ -338,14 +353,14 @@ function MoADrafts({
           {/* Legacy personas (e.g. Minimalist) from older MoA runs */}
           {drafts
             .filter((d) => !AGENT_ORDER.includes(d.persona))
-            .map((d) => {
-              const conf = formatConfidence(d.confidence);
-              return (
+            .map((d) => (
                 <div key={d.persona} className="moa-draft-card moa-draft-card--done">
                   <div className="moa-draft-card-head">
                     <span className="moa-draft-role">{d.persona}</span>
                     <div className="moa-draft-card-meta">
-                      {conf && <span className="moa-draft-confidence">{conf}</span>}
+                      {d.confidence != null && !Number.isNaN(d.confidence) && (
+                        <ConfidenceMeter value={d.confidence} />
+                      )}
                       {draftModelLabel(d) && (
                         <span className="moa-draft-model">{draftModelLabel(d)}</span>
                       )}
@@ -353,8 +368,14 @@ function MoADrafts({
                   </div>
                   <div className="moa-draft-card-body">{d.text}</div>
                 </div>
-              );
-            })}
+            ))}
+        </div>
+      )}
+      {open && finished && (
+        <div className="moa-synthesis-seam">
+          <span className="moa-synthesis-seam-line" aria-hidden="true" />
+          <span>synthesized below · weighted by confidence</span>
+          <span className="moa-synthesis-seam-line" aria-hidden="true" />
         </div>
       )}
     </div>
@@ -368,6 +389,9 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
   const [editDraft, setEditDraft] = useState(content);
   const [hovered, setHovered] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
+
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+  useEscapeKey(lightbox != null, closeLightbox);
 
   function startEdit() {
     setEditDraft(content);
@@ -414,9 +438,15 @@ export default function MessageBubble({ message, sessionId, onResend, onRegenera
           </div>
         )}
         {lightbox && (
-          <div className="lightbox-backdrop" onClick={() => setLightbox(null)}>
+          <div
+            className="lightbox-backdrop"
+            onClick={closeLightbox}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Image preview"
+          >
             <img src={lightbox} alt="full size" className="lightbox-img" />
-            <button className="lightbox-close" onClick={() => setLightbox(null)} aria-label="Close"><Icon name="close" /></button>
+            <button className="lightbox-close" onClick={closeLightbox} aria-label="Close"><Icon name="close" /></button>
           </div>
         )}
 

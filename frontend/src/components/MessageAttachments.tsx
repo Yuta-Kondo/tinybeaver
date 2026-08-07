@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useEscapeKey } from "../hooks/useEscapeKey";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { MessageAttachment } from "../lib/attachments";
 import { fileIcon } from "../lib/attachments";
 import Icon from "./Icon";
@@ -13,6 +15,11 @@ interface Props {
 
 export default function MessageAttachments({ attachments }: Props) {
   const [viewer, setViewer] = useState<Viewer | null>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  const close = useCallback(() => setViewer(null), []);
+  useEscapeKey(viewer != null, close);
+  useFocusTrap(viewer?.mode === "text", modalRef);
 
   if (!attachments.length) return null;
 
@@ -46,20 +53,33 @@ export default function MessageAttachments({ attachments }: Props) {
       </div>
 
       {viewer?.mode === "image" && (
-        <div className="lightbox-backdrop" onClick={() => setViewer(null)}>
+        <div
+          className="lightbox-backdrop"
+          onClick={close}
+          role="dialog"
+          aria-modal="true"
+          aria-label={viewer.name}
+        >
           <img src={viewer.src} alt={viewer.name} className="lightbox-img" />
-          <button className="lightbox-close" onClick={() => setViewer(null)} aria-label="Close">
+          <button className="lightbox-close" onClick={close} aria-label="Close">
             <Icon name="close" />
           </button>
         </div>
       )}
 
       {viewer?.mode === "text" && (
-        <div className="attachment-modal-backdrop" onClick={() => setViewer(null)}>
-          <div className="attachment-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="attachment-modal-backdrop" onClick={close} role="presentation">
+          <div
+            ref={modalRef}
+            className="attachment-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={viewer.name}
+          >
             <div className="attachment-modal-header">
               <span className="attachment-modal-title">{viewer.name}</span>
-              <button className="attachment-modal-close" onClick={() => setViewer(null)} aria-label="Close">
+              <button className="attachment-modal-close" onClick={close} aria-label="Close">
                 <Icon name="close" size={14} />
               </button>
             </div>
