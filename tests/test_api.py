@@ -106,13 +106,13 @@ def test_list_topics_ignores_content_only_topics():
 def test_get_topic():
     """`content` is rendered from the fact list, not the legacy content blob."""
     save_topic("career", "ignored blob", "")
-    add_fact("career", "Starting a PhD at McMaster in Sept 2026")
+    add_fact("career", "Starting a new role at Acme Corp in Sept 2026")
     resp = client.get("/topics/career")
     assert resp.status_code == 200
     data = resp.json()
     assert data["slug"] == "career"
     assert data["fact_count"] == 1
-    assert data["content"] == "- Starting a PhD at McMaster in Sept 2026"
+    assert data["content"] == "- Starting a new role at Acme Corp in Sept 2026"
 
 
 def test_fixed_category_description_is_code_owned():

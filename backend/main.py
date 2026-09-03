@@ -133,7 +133,7 @@ _calc_cost = calc_cost
 
 _STATIC_SYSTEM = """\
 You are Yuta's personal AI assistant with access to structured memory about \
-his life, work, and goals — PhD program, finances, immigration, housing search, \
+his life, work, and goals — career, finances, admin, housing, \
 and ongoing projects. Speak directly and concisely.
 
 Format responses in Markdown. Use LaTeX for all mathematics \
@@ -239,7 +239,7 @@ You prepare web search for a chat assistant (single model or Self-MoA).
 Return ONLY JSON: {{"queries": ["short search query", ...]}}
 
 Include 1–3 queries when the answer benefits from live/external facts: salaries, prices,
-visa/immigration rules, academic deadlines, company/product status, policies, rates,
+legal/admin rules, deadlines, company/product status, policies, rates,
 schedules, news, comparisons that change over time, "latest"/"current" lookups.
 Use empty queries [] when personal context, memory, coding help, or timeless reasoning is enough.
 Do not search for pure preference with no factual dependency.

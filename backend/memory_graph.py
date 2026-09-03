@@ -16,14 +16,14 @@ _log = logging.getLogger(__name__)
 # always-on synthesis, not a peer category. Entities cross-link across domains.
 FIXED_CATEGORIES: dict[str, str] = {
     "identity": "Who Yuta is — background, values, biography (not day-to-day prefs)",
-    "career": "PhD, research, jobs, advisors, professional work",
+    "career": "Work, research, jobs, advisors, professional life",
     "money": "Banking, budget, taxes, investments",
-    "admin": "Immigration, government, legal, visas, paperwork",
-    "home": "Housing, address, landlord, neighborhood",
+    "admin": "Government, legal, and administrative paperwork",
+    "home": "Housing, address, neighborhood",
     "body": "Health, fitness, sleep, medical",
-    "people": "Family, dating, friends, social relationships",
+    "people": "Family, friends, social relationships",
     "craft": "Skills, tools, languages, learning, engineering practice",
-    "play": "Hobbies, recreation, fun (sailing, games, etc.)",
+    "play": "Hobbies and recreation",
     "ops": "How the assistant should behave — communication & workflow prefs",
     "misc": "Explicit overflow only when nothing above fits",
 }
@@ -725,7 +725,7 @@ Filing resolver (first match wins if ambiguous):
 identity → admin → career → money → home → body → people → craft → play → ops → misc.
 Use misc only when nothing else fits. Do not invent categories.
 ops = how the assistant should behave; identity = who Yuta is.
-career includes PhD/research; admin includes visas/immigration paperwork.
+career includes work/research; admin includes legal/government paperwork.
 
 Existing entities (reuse names when the same person/org/place/project):
 {entities}

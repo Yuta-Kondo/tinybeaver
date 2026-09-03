@@ -25,7 +25,7 @@ You classify a user message into personal-memory categories for Yuta.
 Resolver (if ambiguous, pick the earliest that fits):
 identity → admin → career → money → home → body → people → craft → play → ops → misc
 Rules:
-- career = PhD / research / jobs; admin = visas / immigration / government paperwork
+- career = work / research / jobs; admin = legal / government paperwork
 - ops = how the assistant should behave; identity = who Yuta is
 - misc only if nothing else fits
 - Do NOT invent new category slugs

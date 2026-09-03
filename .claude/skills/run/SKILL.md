@@ -45,4 +45,4 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/
 
 - Backend health: `curl http://localhost:8000/health` → `{"ok":true,...}`
 - Frontend: HTTP 200 on `http://localhost:5173/`
-- Topics search: `curl "http://localhost:8000/topics/search?q=phd"` → results array
+- Topics search: `curl "http://localhost:8000/topics/search?q=career"` → results array

@@ -47,7 +47,7 @@ Also in the request path (not chat models): **Tavily** (web search), **your VPS 
 
 ### Fit for tinybeaver
 
-Best default for **personal memory + email + immigration/PhD context**. Strongest contractual “no train on API” story among current options.
+Best default for **personal memory + email + sensitive personal context**. Strongest contractual “no train on API” story among current options.
 
 ---
 

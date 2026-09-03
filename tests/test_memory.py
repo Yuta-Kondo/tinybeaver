@@ -87,11 +87,11 @@ def test_create_topic_no_duplicate():
 
 
 def test_search_topics():
-    save_topic("phd", "PhD research at McMaster university")
+    save_topic("research", "Research project at Acme University")
     save_topic("finance", "Monthly budget and savings")
-    results = search_topics("McMaster")
+    results = search_topics("Acme")
     slugs = [r["slug"] for r in results]
-    assert "phd" in slugs
+    assert "research" in slugs
     assert "finance" not in slugs
 
 
